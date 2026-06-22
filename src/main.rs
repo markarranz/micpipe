@@ -1,37 +1,34 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 fn main() {
+    // --- Load the WAV file fully into memory ---
+    let mut reader = hound::WavReader::open("test.wav").unwrap();
+    let spec = reader.spec();
+    println!("WAV spec: {:?}", spec);
+
+    // Read all samples as f32, interleaved [L, R, L, R, ...]
+    let samples: Vec<f32> = reader.samples::<f32>().map(|s| s.unwrap()).collect();
+    println!("Loaded {} samples", samples.len());
+
+    // --- Set up the output device ---
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .expect("no default output device");
-
-    println!("Output device: {}", device.description().unwrap());
-
+    let device = host.default_output_device().expect("no output device");
     let config = device.default_output_config().unwrap();
-    println!("Default config: {:?}", config);
+    println!("Output config: {:?}", config);
 
-    let sample_rate = config.sample_rate() as f32;
-    let channels = config.channels() as usize;
-
-    // Sine wave state: phase accumulator
-    let mut phase: f32 = 0.0;
-    let freq = 440.0; // A4
-    let phase_increment = freq / sample_rate;
+    // Playback position: index into the samples vec
+    let mut position = 0;
 
     let stream = device
         .build_output_stream(
             &config.into(),
             move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                // output is interleaved: [L, R, L, R, ...]
-                for frame in output.chunks_mut(channels) {
-                    // Genere one sample of the sine wave
-                    let value = (phase * 2.0 * std::f32::consts::PI).sin() * 0.2;
-                    phase = (phase + phase_increment) % 1.0;
-
-                    // Write the same value to every channel in this frame
-                    for sample in frame.iter_mut() {
-                        *sample = value;
+                for out_sample in output.iter_mut() {
+                    if position < samples.len() {
+                        *out_sample = samples[position];
+                        position += 1;
+                    } else {
+                        *out_sample = 0.0; // silence after file ends
                     }
                 }
             },
@@ -41,7 +38,7 @@ fn main() {
         .unwrap();
 
     stream.play().unwrap();
-    println!("Playing 440 Hz tone. Press Enter to stop.");
+    println!("Playing test.wav. Press Enter to stop.");
 
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
