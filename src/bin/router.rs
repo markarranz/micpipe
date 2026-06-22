@@ -33,7 +33,7 @@ fn main() {
     );
 
     // --- Ring buffer between the two callbacks ---
-    let capacity = 48_000; // ~0.5s of stereo @ 48k
+    let capacity = 48_000; // ~0.25s of stereo @ 96k
     let (mut producer, mut consumer) = HeapRb::<f32>::new(capacity).split();
 
     // --- Input callback: capture -> convert -> resample -> push ---
@@ -45,7 +45,7 @@ fn main() {
         .build_input_stream(
             &in_config.into(),
             move |input: &[f32], _: &cpal::InputCallbackInfo| {
-                // `input` is interleaed at in_channels. Walk it frame by frame.
+                // `input` is interleaved at in_channels. Walk it frame by frame.
                 for frame in input.chunks(in_channels) {
                     if frame.len() < in_channels {
                         break; // ignore a trailing partial frame
@@ -83,7 +83,11 @@ fn main() {
     input_stream.play().unwrap();
     output_stream.play().unwrap();
 
-    println!("Mic -> BlackHole running. Press Enter to stop.");
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).unwrap();
+    println!("Mic -> BlackHole running...");
+
+    // Keep the process (and the streams) alive forever.
+    // The streams stop the moment they're dropped, so main must not return.
+    loop {
+        std::thread::park();
+    }
 }
