@@ -9,16 +9,33 @@ use ringbuf::{
 fn spawn_source(path: &'static str, mut producer: impl Producer<Item = f32> + Send + 'static) {
     thread::spawn(move || {
         let mut reader = hound::WavReader::open(path).unwrap();
-        let samples: Vec<f32> = reader.samples::<f32>().map(|s| s.unwrap()).collect();
+        let mut samples = reader.samples::<f32>();
 
-        let mut i = 0;
-        while i < samples.len() {
-            match producer.try_push(samples[i]) {
-                Ok(()) => i += 1,
-                Err(_) => thread::sleep(std::time::Duration::from_millis(1)),
+        // The "buffer for the buffer": a sample pulled but not yet pushed
+        let mut pending: Option<f32> = None;
+
+        loop {
+            // Refill the pending slot only if it's empty.
+            if pending.is_none() {
+                match samples.next() {
+                    Some(Ok(s)) => pending = Some(s),
+                    Some(Err(e)) => {
+                        eprintln!("'{}': decode error: {}", path, e);
+                        break;
+                    }
+                    None => break, // end of file
+                }
+            }
+
+            // Try to push whatever is pending.
+            if let Some(s) = pending {
+                match producer.try_push(s) {
+                    Ok(()) => pending = None, // pushed - clear the slot
+                    Err(_) => thread::sleep(std::time::Duration::from_millis(1)), // full - keep pending, retry
+                }
             }
         }
-        println!("Source '{}': done feeding {} samples", path, samples.len());
+        println!("Source '{}': stream finished", path);
     });
 }
 
