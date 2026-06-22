@@ -1,4 +1,4 @@
-/// Streaming linear resampler. Operatres on whole frames (channels samples each).
+/// Streaming linear resampler. Operates on whole frames (channels samples each).
 pub struct Resampler {
     ratio: f32,        // in_rate / out_rate; how far position advances per output frame
     position: f32,     // fractional position in [0, 1) between `prev` and `next`
