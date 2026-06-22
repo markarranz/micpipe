@@ -1,4 +1,4 @@
-use cpal::traits::{DeviceTrait, HostTrait};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 fn main() {
     let host = cpal::default_host();
@@ -6,26 +6,43 @@ fn main() {
         .default_output_device()
         .expect("no default output device");
 
-    println!("Default output device: {}", device.description().unwrap());
+    println!("Output device: {}", device.description().unwrap());
 
-    println!("\nAll output devices:");
-    for device in host.output_devices().unwrap() {
-        let desc = device.description().unwrap();
-        println!(" {}", desc);
-        match device.supported_output_configs() {
-            Ok(configs) => {
-                for config in configs {
-                    println!(
-                        "   channels: {}, sample rate: {:?}-{:?}, format: {:?}, buffer: {:?}",
-                        config.channels(),
-                        config.min_sample_rate(),
-                        config.max_sample_rate(),
-                        config.sample_format(),
-                        config.buffer_size(),
-                    );
+    let config = device.default_output_config().unwrap();
+    println!("Default config: {:?}", config);
+
+    let sample_rate = config.sample_rate() as f32;
+    let channels = config.channels() as usize;
+
+    // Sine wave state: phase accumulator
+    let mut phase: f32 = 0.0;
+    let freq = 440.0; // A4
+    let phase_increment = freq / sample_rate;
+
+    let stream = device
+        .build_output_stream(
+            &config.into(),
+            move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                // output is interleaved: [L, R, L, R, ...]
+                for frame in output.chunks_mut(channels) {
+                    // Genere one sample of the sine wave
+                    let value = (phase * 2.0 * std::f32::consts::PI).sin() * 0.2;
+                    phase = (phase + phase_increment) % 1.0;
+
+                    // Write the same value to every channel in this frame
+                    for sample in frame.iter_mut() {
+                        *sample = value;
+                    }
                 }
-            }
-            Err(e) => println!("   Error getting configs: {}", e),
-        }
-    }
+            },
+            |err| eprintln!("stream error: {}", err),
+            None,
+        )
+        .unwrap();
+
+    stream.play().unwrap();
+    println!("Playing 440 Hz tone. Press Enter to stop.");
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
 }
