@@ -11,8 +11,8 @@ cp ./com.markarranz.minimix.plist ~/Library/LaunchAgents/
 After any rebuild, the update cycle is:
 
 ```bash
-cargo build --release --bin router
-cp target/release/router ~/.local/bin/minimix
+cargo build --release --bin minimix
+cp target/release/minimix ~/.local/bin/minimix
 launchctl kickstart -k gui/$(id -u)/com.markarranz.minimix
 tail -f ~/.local/share/minimix/out.log
 ```
