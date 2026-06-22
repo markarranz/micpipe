@@ -6,51 +6,51 @@ use ringbuf::{
     traits::{Consumer, Producer, Split},
 };
 
+fn spawn_source(path: &'static str, mut producer: impl Producer<Item = f32> + Send + 'static) {
+    thread::spawn(move || {
+        let mut reader = hound::WavReader::open(path).unwrap();
+        let samples: Vec<f32> = reader.samples::<f32>().map(|s| s.unwrap()).collect();
+
+        let mut i = 0;
+        while i < samples.len() {
+            match producer.try_push(samples[i]) {
+                Ok(()) => i += 1,
+                Err(_) => thread::sleep(std::time::Duration::from_millis(1)),
+            }
+        }
+        println!("Source '{}': done feeding {} samples", path, samples.len());
+    });
+}
+
 fn main() {
-    // --- Output device ---
     let host = cpal::default_host();
     let device = host.default_output_device().expect("no output device");
     let config = device.default_output_config().unwrap();
     println!("Output config: {:?}", config);
 
-    // --- Ring buffer: capacity in INTERLEAVED SAMPLES ---
-    // 48000 Hz * 2 channels = 96000 samples/sec.
-    // 48000 sample capacity = 0.5s of audio buffered.
     let capacity = 48_000;
-    let rb = HeapRb::<f32>::new(capacity);
-    let (mut producer, mut consumer) = rb.split();
 
-    // --- Source thread: read WAV, push into ring buffer ---
-    thread::spawn(move || {
-        let mut reader = hound::WavReader::open("a.wav").unwrap();
-        let samples: Vec<f32> = reader.samples::<f32>().map(|s| s.unwrap()).collect();
+    // Two ring buffers, one per source.
+    let (producer_a, mut consumer_a) = HeapRb::<f32>::new(capacity).split();
+    let (producer_b, mut consumer_b) = HeapRb::<f32>::new(capacity).split();
 
-        let mut i = 0;
-        loop {
-            if i >= samples.len() {
-                break; // file exhausted
-            }
-            // Try to push the next sample. If the buffer is full, the producer can't push - spin
-            // briefly and retry rather than dropping data.
-            match producer.try_push(samples[i]) {
-                Ok(()) => i += 1,
-                Err(_) => {
-                    // Buffer full - wait a moment for the consumer to drain it.
-                    thread::sleep(std::time::Duration::from_millis(1));
-                }
-            }
-        }
-        println!("Source thread: done feeding {} samples", samples.len());
-    });
+    // Per-source gain (faders).
+    let gain_a: f32 = 0.5;
+    let gain_b: f32 = 0.5;
 
-    // --- Audio callback: pull from ring buffer, output ---
+    // Launch both source threads.
+    spawn_source("a.wav", producer_a);
+    spawn_source("b.wav", producer_b);
+
     let stream = device
         .build_output_stream(
             &config.into(),
             move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 for out_sample in output.iter_mut() {
-                    // Pull one sample. If none available (underrun), output silence.
-                    *out_sample = consumer.try_pop().unwrap_or(0.0);
+                    let a = consumer_a.try_pop().unwrap_or(0.0);
+                    let b = consumer_b.try_pop().unwrap_or(0.0);
+                    // THE MIX.
+                    *out_sample = a * gain_a + b * gain_b;
                 }
             },
             |err| eprintln!("stream error: {}", err),
@@ -59,7 +59,7 @@ fn main() {
         .unwrap();
 
     stream.play().unwrap();
-    println!("Playing a.wav through ring buffer. Press Enter to stop.");
+    println!("Mixing a.wav + b.wav through ring buffers. Press Enter to stop.");
 
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
