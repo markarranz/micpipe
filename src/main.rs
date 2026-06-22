@@ -1,6 +1,3 @@
-mod resampler;
-use resampler::Resampler;
-
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::{
     HeapRb,
@@ -8,22 +5,8 @@ use ringbuf::{
 };
 use std::thread;
 
-/// Convert one input frame (file's channels) into one output frame (device's channels).
-fn convert_frame(input: &[f32], in_ch: usize, out_ch: usize) -> Vec<f32> {
-    match (in_ch, out_ch) {
-        (1, 2) => vec![input[0], input[0]], // mono -> stereo: duplicate
-        (2, 1) => vec![(input[0] + input[1]) * 0.5], // stereo -> mono: average
-        (a, b) if a == b => input.to_vec(), // same: passthrough
-        // Fallback: take what we can, pad with silence.
-        (_, out) => {
-            let mut f = vec![0.0; out];
-            for i in 0..out.min(input.len()) {
-                f[i] = input[i];
-            }
-            f
-        }
-    }
-}
+use minimix::audio::convert_frame;
+use minimix::resampler::Resampler;
 
 fn spawn_source(
     path: &'static str,

@@ -1,11 +1,11 @@
 /// Streaming linear resampler. Operatres on whole frames (channels samples each).
 pub struct Resampler {
-    ratio: f32,
-    position: f32,
-    channels: usize,
-    prev: Vec<f32>,
-    next: Vec<f32>,
-    initialized: bool,
+    ratio: f32,        // in_rate / out_rate; how far position advances per output frame
+    position: f32,     // fractional position in [0, 1) between `prev` and `next`
+    channels: usize,   // number of audio channels
+    prev: Vec<f32>,    // the "left" frame of the current interval
+    next: Vec<f32>,    // the "right" frame
+    initialized: bool, // have we loaded the first prev frame yet?
 }
 
 impl Resampler {
@@ -20,6 +20,7 @@ impl Resampler {
         }
     }
 
+    /// Feed one input frame; appends zero or more output frames to `out`.
     pub fn process(&mut self, input_frame: &[f32], out: &mut Vec<f32>) {
         if !self.initialized {
             self.prev.copy_from_slice(input_frame);
