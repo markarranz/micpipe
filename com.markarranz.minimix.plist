@@ -8,6 +8,7 @@
     <key>ProgramArguments</key>
     <array>
       <string>/Users/mark/.local/bin/minimix</string>
+      <string>run</string>
     </array>
 
     <key>RunAtLoad</key>
