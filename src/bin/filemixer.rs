@@ -100,7 +100,7 @@ fn main() {
 
     let stream = device
         .build_output_stream(
-            &config.into(),
+            config.into(),
             move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 for out_sample in output.iter_mut() {
                     let a = consumer_a.try_pop().unwrap_or(0.0);

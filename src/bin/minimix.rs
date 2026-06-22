@@ -3,7 +3,10 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use cpal::traits::{DeviceTrait, StreamTrait};
+use cpal::{
+    BufferSize, StreamConfig,
+    traits::{DeviceTrait, StreamTrait},
+};
 use ringbuf::{
     HeapRb,
     traits::{Consumer, Observer, Producer, Split},
@@ -13,6 +16,11 @@ use minimix::{
     audio::{convert_frame, find_input_device, find_output_device},
     resampler::Resampler,
 };
+
+// CoreAudio's fixed buffer size.
+const OUTPUT_BUFFER_FRAMES: u32 = 512;
+const STEADY_CUSHION_CALLBACKS: usize = 2;
+const JITTERY_EXTRA_MARGIN_MS: u32 = 50;
 
 fn main() {
     // --- Source: current default input device ---
@@ -27,6 +35,9 @@ fn main() {
     let out_channels = out_config.channels() as usize;
     let out_rate = out_config.sample_rate();
 
+    let mut out_stream_config: StreamConfig = out_config.into();
+    out_stream_config.buffer_size = BufferSize::Fixed(OUTPUT_BUFFER_FRAMES);
+
     println!(
         "Routing: {} ({}ch@{}Hz) -> {} ({}ch@{}Hz)",
         input_device.description().unwrap(),
@@ -37,11 +48,30 @@ fn main() {
         out_rate,
     );
 
-    // --- Ring buffer between the two callbacks ---
-    // ~100ms buffer @ 48k stereo; target a ~30ms cushion before draining.
-    let capacity = 9600;
-    let target_fill = 2800; // ~30ms - the cushion the output waits before strarting
+    // --- Detect jitter risk ---
+    let likely_jittery = in_rate <= 24_000;
+    let samples_per_ms = (out_rate as usize * out_channels) / 1_000;
+    let callback_samples = OUTPUT_BUFFER_FRAMES as usize * out_channels;
+
+    let jitter_extra = if likely_jittery {
+        JITTERY_EXTRA_MARGIN_MS as usize * samples_per_ms
+    } else {
+        0
+    };
+
+    // Cushion = baseline phase-offset coverage + (jittery margin if applicable).
+    let target_fill = STEADY_CUSHION_CALLBACKS * callback_samples + jitter_extra;
+    let capacity = (target_fill * 4).max(callback_samples * 8);
     let (mut producer, mut consumer) = HeapRb::<f32>::new(capacity).split();
+
+    println!(
+        "Input {} | callback {} frames | cushion {} samples (~{}ms) | buffer {} samples",
+        if likely_jittery { "jittery" } else { "steady" },
+        OUTPUT_BUFFER_FRAMES,
+        target_fill,
+        target_fill / samples_per_ms,
+        capacity
+    );
 
     // --- Gate: stays false until the buffer first builds the cushion
     let primed = Arc::new(AtomicBool::new(false));
@@ -56,65 +86,70 @@ fn main() {
     let mut resampler = Resampler::new(in_rate, out_rate, out_channels);
     let mut resampled: Vec<f32> = Vec::with_capacity(8192); // scratch, reused each call
 
+    let input_callback = move |input: &[f32], _: &cpal::InputCallbackInfo| {
+        // `input` is interleaved at in_channels. Walk it frame by frame.
+        for frame in input.chunks(in_channels) {
+            if frame.len() < in_channels {
+                break; // ignore a trailing partial frame
+            }
+
+            let converted = convert_frame(frame, in_channels, out_channels);
+
+            resampled.clear();
+            resampler.process(&converted, &mut resampled);
+
+            for &s in resampled.iter() {
+                // Drop samples if the buffer is full; never block the audio thread.
+                let _ = producer.try_push(s);
+            }
+        }
+    };
+
+    // --- Output callback: drain ring buffer into BlackHole ---
+    let output_callback = move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
+        let available = consumer.occupied_len();
+
+        // Observe buffer fill BEFORE draining (real-time safe: just an atomic store).
+        occupancy_cb.store(available, Ordering::Relaxed);
+
+        // Not yet primed: wait for the cushion to build. Output silence.
+        if !primed_cb.load(Ordering::Relaxed) {
+            if available >= target_fill {
+                primed_cb.store(true, Ordering::Relaxed);
+            } else {
+                for s in output.iter_mut() {
+                    *s = 0.0;
+                }
+                return;
+            }
+        }
+
+        // Primed: drain normally. If we ever fully underrun, re-arm the gate so we rebuild
+        // the cushion instead of stuttering sample-by-sample.
+        for out_sample in output.iter_mut() {
+            match consumer.try_pop() {
+                Some(s) => *out_sample = s,
+                None => {
+                    *out_sample = 0.0;
+                    primed_cb.store(false, Ordering::Relaxed);
+                }
+            }
+        }
+    };
+
     let input_stream = input_device
         .build_input_stream(
-            &in_config.into(),
-            move |input: &[f32], _: &cpal::InputCallbackInfo| {
-                // `input` is interleaved at in_channels. Walk it frame by frame.
-                for frame in input.chunks(in_channels) {
-                    if frame.len() < in_channels {
-                        break; // ignore a trailing partial frame
-                    }
-                    let converted = convert_frame(frame, in_channels, out_channels);
-
-                    resampled.clear();
-                    resampler.process(&converted, &mut resampled);
-
-                    for &s in resampled.iter() {
-                        // Drop samples if the buffer is full; never block the audio thread.
-                        let _ = producer.try_push(s);
-                    }
-                }
-            },
+            in_config.into(),
+            input_callback,
             |err| eprintln!("input stream error: {}", err),
             None,
         )
         .unwrap();
 
-    // --- Output callback: drain ring buffer into BlackHole ---
     let output_stream = output_device
         .build_output_stream(
-            &out_config.into(),
-            move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let available = consumer.occupied_len();
-
-                // Observe buffer fill BEFORE draining (real-time safe: just an atomic store).
-                occupancy_cb.store(available, Ordering::Relaxed);
-
-                // Not yet primed: wait for the cushion to build. Output silence.
-                if !primed_cb.load(Ordering::Relaxed) {
-                    if available >= target_fill {
-                        primed_cb.store(true, Ordering::Relaxed);
-                    } else {
-                        for s in output.iter_mut() {
-                            *s = 0.0;
-                        }
-                        return;
-                    }
-                }
-
-                // Primed: drain normally. If we ever fully underrun, re-arm the gate so we rebuild
-                // the cushion instead of stuttering sample-by-sample.
-                for out_sample in output.iter_mut() {
-                    match consumer.try_pop() {
-                        Some(s) => *out_sample = s,
-                        None => {
-                            *out_sample = 0.0;
-                            primed_cb.store(false, Ordering::Relaxed);
-                        }
-                    }
-                }
-            },
+            out_stream_config,
+            output_callback,
             |err| eprintln!("output stream error: {}", err),
             None,
         )
