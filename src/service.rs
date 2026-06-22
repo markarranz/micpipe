@@ -77,14 +77,56 @@ pub fn uninstall() {
 }
 
 pub fn start() {
-    todo!("launchctl bootstrap")
+    if !plist_path().exists() {
+        eprintln!(
+            "Service not installed. Run `{} install` first.",
+            SERVICE_NAME
+        );
+        std::process::exit(1);
+    }
+
+    let status = ProcCommand::new("launchctl")
+        .args([
+            "bootstrap",
+            &domain_target(),
+            plist_path().to_str().unwrap(),
+        ])
+        .status()
+        .expect("failed to run launchctl");
+
+    if status.success() {
+        println!("{} started.", SERVICE_NAME);
+    } else {
+        eprintln!("Failed to start (it may already be running).");
+    }
 }
+
 pub fn stop() {
-    todo!("launchctl bootout")
+    let status = ProcCommand::new("launchctl")
+        .args(["bootout", &domain_target(), plist_path().to_str().unwrap()])
+        .status()
+        .expect("failed to run launchctl");
+
+    if status.success() {
+        println!("{} stopped.", SERVICE_NAME);
+    } else {
+        eprintln!("Failed to stop (it may not have been running).");
+    }
 }
+
 pub fn restart() {
-    todo!("launchctl kickstart")
+    let status = ProcCommand::new("launchctl")
+        .args(["kickstart", "-k", &service_target()])
+        .status()
+        .expect("failed to run launchctl");
+
+    if status.success() {
+        println!("{} restarted.", SERVICE_NAME);
+    } else {
+        eprintln!("Failed to restart (is it installed and loaded?).");
+    }
 }
+
 pub fn status() {
     todo!("launchctl print + parse")
 }
