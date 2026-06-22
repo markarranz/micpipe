@@ -64,8 +64,18 @@ pub fn install(args: RunArgs) {
 }
 
 pub fn uninstall() {
-    todo!("bootout + remove plist")
+    let _ = ProcCommand::new("launchctl")
+        .args(["bootout", &service_target()])
+        .output();
+
+    if plist_path().exists() {
+        std::fs::remove_file(plist_path()).expect("could not remove plist");
+        println!("Removed {}", plist_path().display());
+    }
+
+    println!("{} service uninstalled", SERVICE_NAME);
 }
+
 pub fn start() {
     todo!("launchctl bootstrap")
 }
