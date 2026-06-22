@@ -1,10 +1,12 @@
-use std::thread;
+mod resampler;
+use resampler::Resampler;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::{
     HeapRb,
     traits::{Consumer, Producer, Split},
 };
+use std::thread;
 
 /// Convert one input frame (file's channels) into one output frame (device's channels).
 fn convert_frame(input: &[f32], in_ch: usize, out_ch: usize) -> Vec<f32> {
@@ -26,26 +28,32 @@ fn convert_frame(input: &[f32], in_ch: usize, out_ch: usize) -> Vec<f32> {
 fn spawn_source(
     path: &'static str,
     out_channels: usize,
+    out_rate: u32,
     mut producer: impl Producer<Item = f32> + Send + 'static,
 ) {
     thread::spawn(move || {
         let reader = hound::WavReader::open(path).unwrap();
         let in_channels = reader.spec().channels as usize;
+        let in_rate = reader.spec().sample_rate;
         println!(
-            "'{}': {} channel(s) -> {} channel(s)",
-            path, in_channels, out_channels
+            "'{}': {}ch@{}Hz -> {}ch@{}Hz",
+            path, in_channels, in_rate, out_channels, out_rate
         );
 
         let mut samples = reader.into_samples::<f32>();
+        let mut resampler = Resampler::new(in_rate, out_rate, out_channels);
 
-        // Pending OUTPUT frame: converted, waiting to be pushed
-        let mut pending: Option<Vec<f32>> = None;
-        let mut pushed_in_frame = 0; // how many samples of the pending frame are already in the buffer
+        // Output samples produced by the resampler, waiting to be pushed.
+        let mut pending: Vec<f32> = Vec::new();
+        let mut push_idx = 0;
 
         loop {
-            // Build a new pending output frame if we don't have one.
-            if pending.is_none() {
-                // Read one INPUT frame: in_channels sample.
+            // If nothing pending, read one input frame, convert channels, resample.
+            if push_idx >= pending.len() {
+                pending.clear();
+                push_idx = 0;
+
+                // Read one INPUT frame.
                 let mut input_frame = Vec::with_capacity(in_channels);
                 let mut ended = false;
                 for _ in 0..in_channels {
@@ -65,27 +73,21 @@ fn spawn_source(
                 if ended || input_frame.len() < in_channels {
                     break; // clean end of file (or partial frame at EOF)
                 }
-                pending = Some(convert_frame(&input_frame, in_channels, out_channels));
-                pushed_in_frame = 0;
+
+                // Convert channels, then resample. Resampler appends to `pending`.
+                let converted = convert_frame(&input_frame, in_channels, out_channels);
+                resampler.process(&converted, &mut pending);
+
+                // process() may emit zero frames (e.g. the very first call), so loop again.
+                if pending.is_empty() {
+                    continue;
+                }
             }
 
-            // Push the pending frame sample-by-sample; only clear when fully pushed.
-            if let Some(frame) = &pending {
-                let mut blocked = false;
-                while pushed_in_frame < frame.len() {
-                    match producer.try_push(frame[pushed_in_frame]) {
-                        Ok(()) => pushed_in_frame += 1,
-                        Err(_) => {
-                            blocked = true;
-                            break;
-                        }
-                    }
-                }
-                if pushed_in_frame == frame.len() {
-                    pending = None; // whole frame delivered
-                } else if blocked {
-                    thread::sleep(std::time::Duration::from_millis(1));
-                }
+            // Push the pending output samples into the ring buffer.
+            match producer.try_push(pending[push_idx]) {
+                Ok(()) => push_idx += 1,
+                Err(_) => thread::sleep(std::time::Duration::from_millis(1)),
             }
         }
         println!("Source '{}': stream finished", path);
@@ -99,6 +101,7 @@ fn main() {
     println!("Output config: {:?}", config);
 
     let out_channels = config.channels() as usize;
+    let out_rate = config.sample_rate();
 
     let capacity = 48_000;
     let (producer_a, mut consumer_a) = HeapRb::<f32>::new(capacity).split();
@@ -109,8 +112,8 @@ fn main() {
     let gain_b: f32 = 0.5;
 
     // Launch both source threads.
-    spawn_source("a.wav", out_channels, producer_a);
-    spawn_source("b.mono.441k.wav", out_channels, producer_b);
+    spawn_source("a.wav", out_channels, out_rate, producer_a);
+    spawn_source("b.mono.441k.wav", out_channels, out_rate, producer_b);
 
     let stream = device
         .build_output_stream(
@@ -129,7 +132,7 @@ fn main() {
         .unwrap();
 
     stream.play().unwrap();
-    println!("Mixing a.wav + b.mono.wav through ring buffers. Press Enter to stop.");
+    println!("Mixing a.wav + b.mono.441k.wav through ring buffers. Press Enter to stop.");
 
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
