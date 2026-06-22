@@ -8,10 +8,8 @@ const SERVICE_LABEL: &str = "com.markarranz.micpipe";
 const PLIST_TEMPLATE: &str = include_str!("plist.template");
 
 pub fn install(args: RunArgs) {
-    // Ensure the log directory exists (StandardOutPath won't create it).
     std::fs::create_dir_all(log_dir()).expect("could not create log dir");
 
-    // Build ProgramArguments: the binary, "run", and the baked-in options.
     let mut program_args = vec![
         binary_path().to_str().unwrap().to_string(),
         "run".to_string(),
@@ -43,7 +41,6 @@ pub fn install(args: RunArgs) {
     );
     std::fs::write(plist_path(), plist).expect("could not write plist");
 
-    // Bootstrap it.
     let status = ProcCommand::new("launchctl")
         .args([
             "bootstrap",
@@ -128,7 +125,46 @@ pub fn restart() {
 }
 
 pub fn status() {
-    todo!("launchctl print + parse")
+    let installed = plist_path().exists();
+    if !installed {
+        println!("not installed");
+        println!("run `{} install` to set up the service", SERVICE_NAME);
+        return;
+    }
+
+    let output = ProcCommand::new("launchctl")
+        .args(["print", &service_target()])
+        .output()
+        .expect("failed to run launchctl");
+    if !output.status.success() {
+        println!("installed but not loaded");
+        println!("plist: {}", plist_path().display());
+        println!("run `{} start` to load it", SERVICE_NAME);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let pid = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("pid = "))
+        .map(|p| p.trim());
+    let last_exit = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("last exit code = "))
+        .map(|c| c.trim());
+
+    match pid {
+        Some(pid) => println!("running (pid {})", pid),
+        None => {
+            print!("loaded, but not running");
+            if let Some(code) = last_exit {
+                print!(" (last exit code {})", code);
+            }
+            println!();
+        }
+    }
+
+    println!("plist: {}", plist_path().display());
+    println!("logs: {}", log_dir().display());
 }
 
 fn home() -> PathBuf {
