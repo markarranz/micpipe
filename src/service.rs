@@ -3,6 +3,7 @@ use std::process::Command as ProcCommand;
 
 use crate::cli::RunArgs;
 
+const SERVICE_NAME: &str = "micpipe";
 const SERVICE_LABEL: &str = "com.markarranz.micpipe";
 const PLIST_TEMPLATE: &str = include_str!("plist.template");
 
@@ -53,10 +54,11 @@ pub fn install(args: RunArgs) {
         .expect("failed to run launchctl");
 
     if status.success() {
-        println!("micpipe installed and started");
+        println!("{} service installed and started", SERVICE_NAME);
     } else {
         eprintln!(
-            "plist written, but bootstrap failed (it may already be loaded - try `micpipe restart`"
+            "plist written, but bootstrap failed (it may already be loaded - try `{} restart`",
+            SERVICE_NAME
         );
     }
 }
@@ -92,7 +94,7 @@ fn binary_path() -> PathBuf {
 }
 
 fn log_dir() -> PathBuf {
-    home().join(".local/share/micpipe")
+    home().join(format!(".local/share/{}", SERVICE_NAME))
 }
 
 fn current_uid() -> String {
