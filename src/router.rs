@@ -8,81 +8,24 @@ use cpal::{
     traits::{DeviceTrait, StreamTrait},
 };
 
-use clap::{Parser, Subcommand};
-
 use ringbuf::{
     HeapRb,
     traits::{Consumer, Observer, Producer, Split},
 };
 
-use minimix::{
+use crate::{
     audio::{convert_frame, find_input_device, find_output_device},
     resampler::Resampler,
 };
+
+use crate::cli::RunArgs;
 
 // CoreAudio's fixed buffer size.
 const OUTPUT_BUFFER_FRAMES: u32 = 512;
 const STEADY_CUSHION_CALLBACKS: usize = 2;
 const JITTERY_EXTRA_MARGIN_MS: u32 = 50;
 
-#[derive(Parser)]
-#[command(
-    name = "minimix",
-    version,
-    about = "Route your microphone into BlackHole"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Run the audio driver (this is what the launchd service invokes.)
-    Run(RunArgs),
-    /// Install and start the launchd service.
-    Install(RunArgs),
-    /// Remove the launchd service.
-    Uninstall,
-    /// Start the installed service.
-    Start,
-    /// stop the running service.
-    Stop,
-    /// Restart the service.
-    Restart,
-    /// Show whether the service is installed and running.
-    Status,
-}
-
-#[derive(clap::Args, Clone)]
-struct RunArgs {
-    /// Output device name to route into (substring match).
-    #[arg(short, long, default_value = "BlackHole 2ch")]
-    output: String,
-
-    /// Input device name (substring match). Omit to follow the system default.
-    #[arg(short, long)]
-    input: Option<String>,
-
-    /// Enable per-second buffer occupancy logging.
-    #[arg(short, long)]
-    debug: bool,
-}
-
-fn main() {
-    let cli = Cli::parse();
-    match cli.command {
-        Command::Run(args) => run(args),
-        Command::Install(args) => install(args),
-        Command::Uninstall => uninstall(),
-        Command::Start => start(),
-        Command::Stop => stop(),
-        Command::Restart => restart(),
-        Command::Status => status(),
-    }
-}
-
-fn run(args: RunArgs) {
+pub fn run(args: RunArgs) {
     // --- Source: current default input device ---
     let input_device = find_input_device(args.input.as_deref()); // None = default
     let in_config = input_device.default_input_config().unwrap();
@@ -236,23 +179,4 @@ fn run(args: RunArgs) {
     loop {
         std::thread::park();
     }
-}
-
-fn install(_args: RunArgs) {
-    todo!("write plist + bootstrap")
-}
-fn uninstall() {
-    todo!("bootout + remove plist")
-}
-fn start() {
-    todo!("launchctl bootstrap")
-}
-fn stop() {
-    todo!("launchctl bootout")
-}
-fn restart() {
-    todo!("launchctl kickstart")
-}
-fn status() {
-    todo!("launchctl print + parse")
 }

@@ -1,11 +1,10 @@
 [package]
-name = "minimix"
+name = "micpipe"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 cpal = "0.18"
-hound = "3.5"
 ringbuf = "0.5"
 clap = { version = "4.6", features = ["derive"] }
 ctrlc = "3"
