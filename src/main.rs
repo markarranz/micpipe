@@ -110,7 +110,7 @@ fn main() {
 
     // Launch both source threads.
     spawn_source("a.wav", out_channels, producer_a);
-    spawn_source("b.mono.wav", out_channels, producer_b);
+    spawn_source("b.mono.441k.wav", out_channels, producer_b);
 
     let stream = device
         .build_output_stream(

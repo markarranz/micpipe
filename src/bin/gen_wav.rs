@@ -22,29 +22,29 @@ fn write_tone(path: &str, freq_left: f32, freq_right: f32) {
     println!("Wrote {}", path);
 }
 
-fn write_tone_mono(path: &str, freq: f32) {
+fn write_tone_mono(path: &str, freq: f32, sample_rate: u32) {
     let spec = WavSpec {
         channels: 1,
-        sample_rate: 48000,
+        sample_rate,
         bits_per_sample: 32,
         sample_format: SampleFormat::Float,
     };
     let mut writer = WavWriter::create(path, spec).unwrap();
-    let sample_rate = 48000.0_f32;
-    let total_frames = (sample_rate * 3.0) as usize;
+    let sr = sample_rate as f32;
+    let total_frames = (sr * 3.0) as usize;
 
     for i in 0..total_frames {
-        let t = i as f32 / sample_rate;
+        let t = i as f32 / sr;
         let s = (t * freq * 2.0 * std::f32::consts::PI).sin() * 0.3;
         writer.write_sample(s).unwrap();
     }
     writer.finalize().unwrap();
-    println!("Wrote {}", path);
+    println!("Wrote {} at {} Hz", path, sample_rate);
 }
 
 fn main() {
     // A4, both channels
     write_tone("a.wav", 440.0, 440.0);
-    // C#4, single channel
-    write_tone_mono("b.mono.wav", 277.18);
+    // C#4, single channel, 44.1k
+    write_tone_mono("b.mono.441k.wav", 277.18, 44_100);
 }
