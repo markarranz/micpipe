@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(
     name = "micpipe",
     version,
@@ -11,7 +11,7 @@ pub struct Cli {
     pub command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run the audio driver (this is what the launchd service invokes.)
     Run(RunArgs),
@@ -29,7 +29,7 @@ pub enum Command {
     Status,
 }
 
-#[derive(clap::Args, Clone)]
+#[derive(Debug, Clone, clap::Args)]
 pub struct RunArgs {
     /// Output device name to route into (substring match).
     #[arg(short, long, default_value = "BlackHole 2ch")]

@@ -1,6 +1,6 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 
-use crate::error::{self, Result};
+use crate::error::{OptionExt, Result, ResultExt};
 
 /// Convert one input frame into one output frame.
 pub fn convert_frame(input: &[f32], in_ch: usize, output: &mut [f32]) {
@@ -31,17 +31,18 @@ pub fn find_output_device(name: Option<&str>) -> Result<cpal::Device> {
     match name {
         None => Ok(host
             .default_output_device()
-            .ok_or_else(|| error::message("no default output device"))?),
+            .context("no default output device")?),
         Some(needle) => {
             let needle = needle.to_lowercase();
             Ok(host
-                .output_devices()?
+                .output_devices()
+                .context("could not enumerate output devices")?
                 .find(|d| {
                     d.description()
-                        .map(|desc| desc.to_string().to_lowercase().contains(&needle))
+                        .map(|desc| device_description_matches(&desc.to_string(), &needle))
                         .unwrap_or(false)
                 })
-                .ok_or_else(|| error::message(format!("no output device matching '{needle}'")))?)
+                .context(format!("no output device matching '{needle}'"))?)
         }
     }
 }
@@ -53,24 +54,29 @@ pub fn find_input_device(name: Option<&str>) -> Result<cpal::Device> {
     match name {
         None => Ok(host
             .default_input_device()
-            .ok_or_else(|| error::message("no default input device"))?),
+            .context("no default input device")?),
         Some(needle) => {
             let needle = needle.to_lowercase();
             Ok(host
-                .input_devices()?
+                .input_devices()
+                .context("could not enumerate input devices")?
                 .find(|d| {
                     d.description()
-                        .map(|desc| desc.to_string().to_lowercase().contains(&needle))
+                        .map(|desc| device_description_matches(&desc.to_string(), &needle))
                         .unwrap_or(false)
                 })
-                .ok_or_else(|| error::message(format!("no input device matching '{needle}'")))?)
+                .context(format!("no input device matching '{needle}'"))?)
         }
     }
 }
 
+fn device_description_matches(description: &str, lowercase_needle: &str) -> bool {
+    description.to_lowercase().contains(lowercase_needle)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::convert_frame;
+    use super::{convert_frame, device_description_matches};
 
     #[test]
     fn duplicates_mono_to_stereo() {
@@ -106,5 +112,18 @@ mod tests {
         convert_frame(&[0.25], 4, &mut output);
 
         assert_eq!(output, [0.25, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn matches_device_description_case_insensitively() {
+        assert!(device_description_matches("BlackHole 2ch", "blackhole"));
+        assert!(device_description_matches(
+            "MacBook Pro Microphone [Microphone] via Built-in",
+            "microphone"
+        ));
+        assert!(!device_description_matches(
+            "External Headphones",
+            "blackhole"
+        ));
     }
 }

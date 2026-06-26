@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 
 use cpal::{
@@ -10,12 +10,12 @@ use cpal::{
 
 use ringbuf::{
     HeapRb,
-    traits::{Consumer, Observer, Producer, Split},
+    traits::{Consumer, Producer, Split},
 };
 
 use crate::{
     audio::{convert_frame, find_input_device, find_output_device},
-    error::Result,
+    error::{Result, ResultExt},
     resampler::Resampler,
     service,
 };
@@ -26,164 +26,111 @@ use crate::cli::RunArgs;
 const OUTPUT_BUFFER_FRAMES: u32 = 512;
 const STEADY_CUSHION_CALLBACKS: usize = 2;
 const JITTERY_EXTRA_MARGIN_MS: u32 = 50;
+const RESAMPLED_SCRATCH_CAPACITY: usize = 8192;
 
 pub fn run(args: RunArgs) -> Result<()> {
-    // --- Source: current default input device ---
-    let input_device = find_input_device(args.input.as_deref())?; // None = default
-    let in_config = input_device.default_input_config()?;
-    let in_channels = in_config.channels() as usize;
-    let in_rate = in_config.sample_rate();
-    let input_device_description = input_device.description()?.to_string();
-
-    // --- Sink: BlackHole 2ch ---
-    let output_device = find_output_device(Some(&args.output))?;
-    let out_config = output_device.default_output_config()?;
-    let out_channels = out_config.channels() as usize;
-    let out_rate = out_config.sample_rate();
-    let output_device_description = output_device.description()?.to_string();
-
-    let mut out_stream_config: StreamConfig = out_config.into();
-    out_stream_config.buffer_size = BufferSize::Fixed(OUTPUT_BUFFER_FRAMES);
+    let route = AudioRoute::from_args(&args)?;
 
     crate::log_out!(
         "Routing: {} ({}ch@{}Hz) -> {} ({}ch@{}Hz)",
-        input_device_description,
-        in_channels,
-        in_rate,
-        output_device_description,
-        out_channels,
-        out_rate,
+        route.input_description,
+        route.in_channels,
+        route.in_rate,
+        route.output_description,
+        route.out_channels,
+        route.out_rate,
     );
 
-    // --- Detect jitter risk ---
-    let likely_jittery = in_rate <= 24_000;
-    let samples_per_ms = (out_rate as usize * out_channels) / 1_000;
-    let callback_samples = OUTPUT_BUFFER_FRAMES as usize * out_channels;
-
-    let jitter_extra = if likely_jittery {
-        JITTERY_EXTRA_MARGIN_MS as usize * samples_per_ms
-    } else {
-        0
-    };
-
-    // Cushion = baseline phase-offset coverage + (jittery margin if applicable).
-    let target_fill = STEADY_CUSHION_CALLBACKS * callback_samples + jitter_extra;
-    let capacity = (target_fill * 4).max(callback_samples * 8);
-    let (mut producer, mut consumer) = HeapRb::<f32>::new(capacity).split();
+    let buffer_plan = BufferPlan::new(route.in_rate, route.out_rate, route.out_channels);
+    let (producer, consumer) = HeapRb::<f32>::new(buffer_plan.capacity).split();
 
     crate::log_out!(
         "Input {} | callback {} frames | cushion {} samples (~{}ms) | buffer {} samples",
-        if likely_jittery { "jittery" } else { "steady" },
+        if buffer_plan.likely_jittery {
+            "jittery"
+        } else {
+            "steady"
+        },
         OUTPUT_BUFFER_FRAMES,
-        target_fill,
-        target_fill / samples_per_ms,
-        capacity
+        buffer_plan.target_fill,
+        buffer_plan.target_fill / buffer_plan.samples_per_ms,
+        buffer_plan.capacity
     );
 
-    // --- Gate: stays false until the buffer first builds the cushion
-    let primed = Arc::new(AtomicBool::new(false));
-    let primed_cb = Arc::clone(&primed);
-
-    // --- Clock-drift instrumentation: shared buffer-occupancy gauge ---
+    // Clock-drift instrumentation: shared buffer-occupancy gauge.
     let occupancy = Arc::new(AtomicUsize::new(0));
-    let occupancy_cb = Arc::clone(&occupancy); // moves into the output callback
     let occupancy_log = Arc::clone(&occupancy); // moves into the logger thread
 
-    // --- Input callback: capture -> convert -> resample -> push ---
-    let mut resampler = Resampler::new(in_rate, out_rate, out_channels);
-    let mut converted = vec![0.0; out_channels];
-    let mut resampled: Vec<f32> = Vec::with_capacity(8192); // scratch, reused each call
-
+    let mut input_pipe = InputPipe::new(
+        producer,
+        route.in_channels,
+        route.in_rate,
+        route.out_rate,
+        route.out_channels,
+    );
     let input_callback = move |input: &[f32], _: &cpal::InputCallbackInfo| {
-        // `input` is interleaved at in_channels. Walk it frame by frame.
-        for frame in input.chunks(in_channels) {
-            if frame.len() < in_channels {
-                break; // ignore a trailing partial frame
-            }
-
-            convert_frame(frame, in_channels, &mut converted);
-
-            resampled.clear();
-            resampler.process(&converted, &mut resampled);
-
-            for &s in resampled.iter() {
-                // Drop samples if the buffer is full; never block the audio thread.
-                let _ = producer.try_push(s);
-            }
-        }
+        input_pipe.capture(input);
     };
 
-    // --- Output callback: drain ring buffer into BlackHole ---
+    let mut output_pipe = OutputPipe::new(consumer, buffer_plan.target_fill, occupancy);
     let output_callback = move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-        let available = consumer.occupied_len();
-
-        // Observe buffer fill BEFORE draining (real-time safe: just an atomic store).
-        occupancy_cb.store(available, Ordering::Relaxed);
-
-        // Not yet primed: wait for the cushion to build. Output silence.
-        if !primed_cb.load(Ordering::Relaxed) {
-            if available >= target_fill {
-                primed_cb.store(true, Ordering::Relaxed);
-            } else {
-                for s in output.iter_mut() {
-                    *s = 0.0;
-                }
-                return;
-            }
-        }
-
-        // Primed: drain normally. If we ever fully underrun, re-arm the gate so we rebuild
-        // the cushion instead of stuttering sample-by-sample.
-        for out_sample in output.iter_mut() {
-            match consumer.try_pop() {
-                Some(s) => *out_sample = s,
-                None => {
-                    *out_sample = 0.0;
-                    primed_cb.store(false, Ordering::Relaxed);
-                }
-            }
-        }
+        output_pipe.fill(output);
     };
 
-    let input_error_device_description = input_device_description.clone();
+    let input_error_device_description = route.input_description.clone();
     let mut restart_requested = false;
-    let input_stream = input_device.build_input_stream(
-        in_config.into(),
-        input_callback,
-        move |err| {
-            crate::log_err!("input stream error: {}", err);
-            if err.kind() == ErrorKind::DeviceNotAvailable && !restart_requested {
-                restart_requested = true;
-                crate::log_out!(
-                    "input device disconnected: {}; attempting micpipe restart",
-                    input_error_device_description
-                );
-                request_restart_after_disconnect();
-            }
-        },
-        None,
-    )?;
+    let input_stream = route
+        .input_device
+        .build_input_stream(
+            route.input_config,
+            input_callback,
+            move |err| {
+                crate::log_err!("input stream error: {}", err);
+                if err.kind() == ErrorKind::DeviceNotAvailable && !restart_requested {
+                    restart_requested = true;
+                    crate::log_out!(
+                        "input device disconnected: {}; attempting micpipe restart",
+                        input_error_device_description
+                    );
+                    request_restart_after_disconnect();
+                }
+            },
+            None,
+        )
+        .context("failed to build input stream")?;
 
-    let output_stream = output_device.build_output_stream(
-        out_stream_config,
-        output_callback,
-        |err| crate::log_err!("output stream error: {}", err),
-        None,
-    )?;
+    let output_stream = route
+        .output_device
+        .build_output_stream(
+            route.output_config,
+            output_callback,
+            |err| crate::log_err!("output stream error: {}", err),
+            None,
+        )
+        .context("failed to build output stream")?;
 
-    input_stream.play()?;
-    output_stream.play()?;
+    input_stream
+        .play()
+        .context("failed to start input stream")?;
+    output_stream
+        .play()
+        .context("failed to start output stream")?;
 
     crate::log_out!("Mic -> BlackHole running...");
 
-    // --- Logger thread: prints occupancy once per second (off the audio thread) ---
+    // Logger thread prints occupancy once per second off the audio thread.
     if args.debug {
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 let occ = occupancy_log.load(Ordering::Relaxed);
-                let pct = (occ as f32 / capacity as f32) * 100.0;
-                crate::log_out!("buffer: {} / {} samples ({:.1}%)", occ, capacity, pct);
+                let pct = (occ as f32 / buffer_plan.capacity as f32) * 100.0;
+                crate::log_out!(
+                    "buffer: {} / {} samples ({:.1}%)",
+                    occ,
+                    buffer_plan.capacity,
+                    pct
+                );
             }
         });
     }
@@ -191,6 +138,192 @@ pub fn run(args: RunArgs) -> Result<()> {
     // Park main forever so the streams stay alive.
     loop {
         std::thread::park();
+    }
+}
+
+struct AudioRoute {
+    input_device: cpal::Device,
+    input_config: StreamConfig,
+    input_description: String,
+    in_channels: usize,
+    in_rate: u32,
+    output_device: cpal::Device,
+    output_config: StreamConfig,
+    output_description: String,
+    out_channels: usize,
+    out_rate: u32,
+}
+
+impl AudioRoute {
+    fn from_args(args: &RunArgs) -> Result<Self> {
+        let input_device = find_input_device(args.input.as_deref())?;
+        let input_config = input_device
+            .default_input_config()
+            .context("failed to get input device default config")?;
+        let in_channels = input_config.channels() as usize;
+        let in_rate = input_config.sample_rate();
+        let input_description = input_device
+            .description()
+            .context("failed to describe input device")?
+            .to_string();
+
+        let output_device = find_output_device(Some(&args.output))?;
+        let output_config = output_device
+            .default_output_config()
+            .context("failed to get output device default config")?;
+        let out_channels = output_config.channels() as usize;
+        let out_rate = output_config.sample_rate();
+        let output_description = output_device
+            .description()
+            .context("failed to describe output device")?
+            .to_string();
+
+        let input_config = input_config.into();
+        let mut output_config: StreamConfig = output_config.into();
+        output_config.buffer_size = BufferSize::Fixed(OUTPUT_BUFFER_FRAMES);
+
+        Ok(Self {
+            input_device,
+            input_config,
+            input_description,
+            in_channels,
+            in_rate,
+            output_device,
+            output_config,
+            output_description,
+            out_channels,
+            out_rate,
+        })
+    }
+}
+
+struct InputPipe<P>
+where
+    P: Producer<Item = f32>,
+{
+    producer: P,
+    in_channels: usize,
+    converted: Vec<f32>,
+    resampled: Vec<f32>,
+    resampler: Resampler,
+}
+
+impl<P> InputPipe<P>
+where
+    P: Producer<Item = f32>,
+{
+    fn new(
+        producer: P,
+        in_channels: usize,
+        in_rate: u32,
+        out_rate: u32,
+        out_channels: usize,
+    ) -> Self {
+        Self {
+            producer,
+            in_channels,
+            converted: vec![0.0; out_channels],
+            resampled: Vec::with_capacity(RESAMPLED_SCRATCH_CAPACITY),
+            resampler: Resampler::new(in_rate, out_rate, out_channels),
+        }
+    }
+
+    fn capture(&mut self, input: &[f32]) {
+        for frame in input.chunks_exact(self.in_channels) {
+            convert_frame(frame, self.in_channels, &mut self.converted);
+
+            self.resampled.clear();
+            self.resampler.process(&self.converted, &mut self.resampled);
+
+            for &sample in &self.resampled {
+                // Drop samples if the buffer is full; never block the audio thread.
+                let _ = self.producer.try_push(sample);
+            }
+        }
+    }
+}
+
+struct OutputPipe<C>
+where
+    C: Consumer<Item = f32>,
+{
+    consumer: C,
+    primed: bool,
+    occupancy: Arc<AtomicUsize>,
+    target_fill: usize,
+}
+
+impl<C> OutputPipe<C>
+where
+    C: Consumer<Item = f32>,
+{
+    fn new(consumer: C, target_fill: usize, occupancy: Arc<AtomicUsize>) -> Self {
+        Self {
+            consumer,
+            primed: false,
+            occupancy,
+            target_fill,
+        }
+    }
+
+    fn fill(&mut self, output: &mut [f32]) {
+        let available = self.consumer.occupied_len();
+
+        // Observe buffer fill before draining. This is real-time safe: just an atomic store.
+        self.occupancy.store(available, Ordering::Relaxed);
+
+        // Wait for the cushion to build before the first non-silent output.
+        if !self.primed {
+            if available >= self.target_fill {
+                self.primed = true;
+            } else {
+                output.fill(0.0);
+                return;
+            }
+        }
+
+        // If we fully underrun, re-arm the gate so we rebuild the cushion instead of stuttering.
+        for out_sample in output.iter_mut() {
+            match self.consumer.try_pop() {
+                Some(sample) => *out_sample = sample,
+                None => {
+                    *out_sample = 0.0;
+                    self.primed = false;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BufferPlan {
+    likely_jittery: bool,
+    samples_per_ms: usize,
+    target_fill: usize,
+    capacity: usize,
+}
+
+impl BufferPlan {
+    fn new(in_rate: u32, out_rate: u32, out_channels: usize) -> Self {
+        let likely_jittery = in_rate <= 24_000;
+        let samples_per_ms = ((out_rate as usize * out_channels) / 1_000).max(1);
+        let callback_samples = OUTPUT_BUFFER_FRAMES as usize * out_channels;
+        let jitter_extra = if likely_jittery {
+            JITTERY_EXTRA_MARGIN_MS as usize * samples_per_ms
+        } else {
+            0
+        };
+
+        // Cushion = baseline phase-offset coverage + (jittery margin if applicable).
+        let target_fill = STEADY_CUSHION_CALLBACKS * callback_samples + jitter_extra;
+        let capacity = (target_fill * 4).max(callback_samples * 8);
+
+        Self {
+            likely_jittery,
+            samples_per_ms,
+            target_fill,
+            capacity,
+        }
     }
 }
 
@@ -207,4 +340,87 @@ fn request_restart_after_disconnect() {
             crate::log_err!("failed to request micpipe restart: {}", err);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use ringbuf::{
+        HeapRb,
+        traits::{Consumer, Producer, Split},
+    };
+
+    use super::{
+        BufferPlan, InputPipe, OUTPUT_BUFFER_FRAMES, OutputPipe, STEADY_CUSHION_CALLBACKS,
+    };
+
+    #[test]
+    fn steady_buffer_plan_uses_two_callback_cushion() {
+        let plan = BufferPlan::new(48_000, 48_000, 2);
+        let callback_samples = OUTPUT_BUFFER_FRAMES as usize * 2;
+
+        assert!(!plan.likely_jittery);
+        assert_eq!(
+            plan.target_fill,
+            STEADY_CUSHION_CALLBACKS * callback_samples
+        );
+        assert_eq!(plan.capacity, callback_samples * 8);
+    }
+
+    #[test]
+    fn jittery_buffer_plan_adds_extra_margin() {
+        let plan = BufferPlan::new(16_000, 48_000, 2);
+
+        assert!(plan.likely_jittery);
+        assert_eq!(plan.samples_per_ms, 96);
+        assert_eq!(plan.target_fill, 2_048 + 4_800);
+        assert_eq!(plan.capacity, plan.target_fill * 4);
+    }
+
+    #[test]
+    fn input_pipe_ignores_partial_input_frames() {
+        let (producer, mut consumer) = HeapRb::<f32>::new(4).split();
+        let mut pipe = InputPipe::new(producer, 2, 48_000, 48_000, 2);
+
+        pipe.capture(&[0.0, 1.0, 0.5]);
+        pipe.capture(&[0.25, 0.75]);
+
+        assert_eq!(consumer.try_pop(), Some(0.0));
+        assert_eq!(consumer.try_pop(), Some(1.0));
+        assert_eq!(consumer.try_pop(), None);
+    }
+
+    #[test]
+    fn output_pipe_waits_for_cushion_before_draining() {
+        let (mut producer, consumer) = HeapRb::<f32>::new(4).split();
+        producer.try_push(0.25).unwrap();
+        producer.try_push(0.75).unwrap();
+        let occupancy = Arc::new(AtomicUsize::new(0));
+        let mut pipe = OutputPipe::new(consumer, 3, Arc::clone(&occupancy));
+        let mut output = [1.0, 1.0];
+
+        pipe.fill(&mut output);
+
+        assert_eq!(output, [0.0, 0.0]);
+        assert_eq!(occupancy.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn output_pipe_drains_after_cushion_is_ready() {
+        let (mut producer, consumer) = HeapRb::<f32>::new(4).split();
+        producer.try_push(0.25).unwrap();
+        producer.try_push(0.75).unwrap();
+        let occupancy = Arc::new(AtomicUsize::new(0));
+        let mut pipe = OutputPipe::new(consumer, 2, Arc::clone(&occupancy));
+        let mut output = [0.0, 0.0];
+
+        pipe.fill(&mut output);
+
+        assert_eq!(output, [0.25, 0.75]);
+        assert_eq!(occupancy.load(Ordering::Relaxed), 2);
+    }
 }
