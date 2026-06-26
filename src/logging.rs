@@ -11,6 +11,20 @@ pub fn stderr(args: fmt::Arguments<'_>) {
     eprintln!("[{}] {}", timestamp_utc(), args);
 }
 
+#[macro_export]
+macro_rules! log_out {
+    ($($arg:tt)*) => {
+        $crate::logging::stdout(format_args!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! log_err {
+    ($($arg:tt)*) => {
+        $crate::logging::stderr(format_args!($($arg)*))
+    };
+}
+
 fn timestamp_utc() -> String {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)

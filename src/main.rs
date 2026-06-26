@@ -1,5 +1,6 @@
 mod audio;
 mod cli;
+mod error;
 mod logging;
 mod resampler;
 mod router;
@@ -9,6 +10,13 @@ use clap::Parser;
 use cli::{Cli, Command};
 
 fn main() {
+    if let Err(err) = run() {
+        eprintln!("{}", err);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> error::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Run(args) => router::run(args),

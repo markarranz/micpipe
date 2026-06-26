@@ -1,17 +1,17 @@
 use std::path::PathBuf;
 use std::process::Command as ProcCommand;
 
-use crate::cli::RunArgs;
+use crate::{cli::RunArgs, error::Result};
 
 const SERVICE_NAME: &str = "micpipe";
 const SERVICE_LABEL: &str = "com.markarranz.micpipe";
 const PLIST_TEMPLATE: &str = include_str!("plist.template");
 
-pub fn install(args: RunArgs) {
-    std::fs::create_dir_all(log_dir()).expect("could not create log dir");
+pub fn install(args: RunArgs) -> Result<()> {
+    std::fs::create_dir_all(log_dir())?;
 
     let mut program_args = vec![
-        binary_path().to_str().unwrap().to_string(),
+        binary_path()?.to_string_lossy().into_owned(),
         "run".to_string(),
         "--output".to_string(),
         args.output.clone(),
@@ -36,19 +36,20 @@ pub fn install(args: RunArgs) {
     let plist = render_plist(
         SERVICE_LABEL,
         &args_xml,
-        out_log.to_str().unwrap(),
-        err_log.to_str().unwrap(),
+        out_log.to_string_lossy().as_ref(),
+        err_log.to_string_lossy().as_ref(),
     );
-    std::fs::write(plist_path(), plist).expect("could not write plist");
+    let plist_path = plist_path();
+    std::fs::write(&plist_path, plist)?;
 
+    let domain = domain_target()?;
     let status = ProcCommand::new("launchctl")
         .args([
             "bootstrap",
-            &domain_target(),
-            plist_path().to_str().unwrap(),
+            domain.as_str(),
+            plist_path.to_string_lossy().as_ref(),
         ])
-        .status()
-        .expect("failed to run launchctl");
+        .status()?;
 
     if status.success() {
         println!("{} service installed and started", SERVICE_NAME);
@@ -58,89 +59,102 @@ pub fn install(args: RunArgs) {
             SERVICE_NAME
         );
     }
+    Ok(())
 }
 
-pub fn uninstall() {
+pub fn uninstall() -> Result<()> {
     let _ = ProcCommand::new("launchctl")
-        .args(["bootout", &service_target()])
+        .args(["bootout", service_target()?.as_str()])
         .output();
 
-    if plist_path().exists() {
-        std::fs::remove_file(plist_path()).expect("could not remove plist");
-        println!("Removed {}", plist_path().display());
+    let plist_path = plist_path();
+    if plist_path.exists() {
+        std::fs::remove_file(&plist_path)?;
+        println!("Removed {}", plist_path.display());
     }
 
     println!("{} service uninstalled", SERVICE_NAME);
+    Ok(())
 }
 
-pub fn start() {
+pub fn start() -> Result<()> {
     if !plist_path().exists() {
-        eprintln!(
-            "Service not installed. Run `{} install` first.",
+        return Err(crate::error::message(format!(
+            "Service not installed. Run `{}` install first.",
             SERVICE_NAME
-        );
-        std::process::exit(1);
+        )));
     }
 
+    let domain = domain_target()?;
+    let plist_path = plist_path();
     let status = ProcCommand::new("launchctl")
         .args([
             "bootstrap",
-            &domain_target(),
-            plist_path().to_str().unwrap(),
+            domain.as_str(),
+            plist_path.to_string_lossy().as_ref(),
         ])
-        .status()
-        .expect("failed to run launchctl");
+        .status()?;
 
     if status.success() {
         println!("{} started.", SERVICE_NAME);
     } else {
         eprintln!("Failed to start (it may already be running).");
     }
+    Ok(())
 }
 
-pub fn stop() {
+pub fn stop() -> Result<()> {
+    let domain = domain_target()?;
+    let plist_path = plist_path();
     let status = ProcCommand::new("launchctl")
-        .args(["bootout", &domain_target(), plist_path().to_str().unwrap()])
-        .status()
-        .expect("failed to run launchctl");
+        .args([
+            "bootout",
+            domain.as_str(),
+            plist_path.to_string_lossy().as_ref(),
+        ])
+        .status()?;
 
     if status.success() {
         println!("{} stopped.", SERVICE_NAME);
     } else {
         eprintln!("Failed to stop (it may not have been running).");
     }
+    Ok(())
 }
 
-pub fn restart() {
+pub fn restart() -> Result<()> {
     match restart_service() {
         Ok(status) if status.success() => println!("{} restarted.", SERVICE_NAME),
         Ok(_) => eprintln!("Failed to restart (is it installed and loaded?)."),
         Err(err) => eprintln!("Failed to restart: {}", err),
     }
+    Ok(())
 }
 
-pub fn restart_service() -> std::io::Result<std::process::ExitStatus> {
-    ProcCommand::new("launchctl")
-        .args(["kickstart", "-k", &service_target()])
-        .status()
+pub fn restart_service() -> Result<std::process::ExitStatus> {
+    let target = service_target()?;
+    Ok(ProcCommand::new("launchctl")
+        .args(["kickstart", "-k", target.as_str()])
+        .status()?)
 }
 
-pub fn status() {
+pub fn status() -> Result<()> {
     let installed = plist_path().exists();
     if !installed {
         println!("not installed");
         println!("run `{} install` to set up the service", SERVICE_NAME);
-        return;
+        return Ok(());
     }
 
+    let target = service_target()?;
     let output = ProcCommand::new("launchctl")
-        .args(["print", &service_target()])
-        .output()
-        .expect("failed to run launchctl");
+        .args(["print", target.as_str()])
+        .output()?;
     if !output.status.success() {
         println!("installed but not loaded");
         println!("plist: {}", plist_path().display());
         println!("run `{} start` to load it", SERVICE_NAME);
+        return Ok(());
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
@@ -166,6 +180,7 @@ pub fn status() {
 
     println!("plist: {}", plist_path().display());
     println!("logs: {}", log_dir().display());
+    Ok(())
 }
 
 fn home() -> PathBuf {
@@ -178,28 +193,25 @@ fn plist_path() -> PathBuf {
         .join(format!("{}.plist", SERVICE_LABEL))
 }
 
-fn binary_path() -> PathBuf {
-    std::env::current_exe().expect("could not determine current executable path")
+fn binary_path() -> Result<PathBuf> {
+    Ok(std::env::current_exe()?)
 }
 
 fn log_dir() -> PathBuf {
     home().join(format!(".local/share/{}", SERVICE_NAME))
 }
 
-fn current_uid() -> String {
-    let output = std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .expect("failed to run `id`");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+fn current_uid() -> Result<String> {
+    let output = std::process::Command::new("id").arg("-u").output()?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn service_target() -> String {
-    format!("gui/{}/{}", current_uid(), SERVICE_LABEL)
+fn service_target() -> Result<String> {
+    Ok(format!("gui/{}/{}", current_uid()?, SERVICE_LABEL))
 }
 
-fn domain_target() -> String {
-    format!("gui/{}", current_uid())
+fn domain_target() -> Result<String> {
+    Ok(format!("gui/{}", current_uid()?))
 }
 
 /// Escapes the characters that must be escaped inside XML *element text*

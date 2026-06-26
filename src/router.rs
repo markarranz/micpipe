@@ -15,7 +15,7 @@ use ringbuf::{
 
 use crate::{
     audio::{convert_frame, find_input_device, find_output_device},
-    logging,
+    error::Result,
     resampler::Resampler,
     service,
 };
@@ -27,25 +27,25 @@ const OUTPUT_BUFFER_FRAMES: u32 = 512;
 const STEADY_CUSHION_CALLBACKS: usize = 2;
 const JITTERY_EXTRA_MARGIN_MS: u32 = 50;
 
-pub fn run(args: RunArgs) {
+pub fn run(args: RunArgs) -> Result<()> {
     // --- Source: current default input device ---
-    let input_device = find_input_device(args.input.as_deref()); // None = default
-    let in_config = input_device.default_input_config().unwrap();
+    let input_device = find_input_device(args.input.as_deref())?; // None = default
+    let in_config = input_device.default_input_config()?;
     let in_channels = in_config.channels() as usize;
     let in_rate = in_config.sample_rate();
-    let input_device_description = input_device.description().unwrap().to_string();
+    let input_device_description = input_device.description()?.to_string();
 
     // --- Sink: BlackHole 2ch ---
-    let output_device = find_output_device(Some(&args.output));
-    let out_config = output_device.default_output_config().unwrap();
+    let output_device = find_output_device(Some(&args.output))?;
+    let out_config = output_device.default_output_config()?;
     let out_channels = out_config.channels() as usize;
     let out_rate = out_config.sample_rate();
-    let output_device_description = output_device.description().unwrap().to_string();
+    let output_device_description = output_device.description()?.to_string();
 
     let mut out_stream_config: StreamConfig = out_config.into();
     out_stream_config.buffer_size = BufferSize::Fixed(OUTPUT_BUFFER_FRAMES);
 
-    logging::stdout(format_args!(
+    crate::log_out!(
         "Routing: {} ({}ch@{}Hz) -> {} ({}ch@{}Hz)",
         input_device_description,
         in_channels,
@@ -53,7 +53,7 @@ pub fn run(args: RunArgs) {
         output_device_description,
         out_channels,
         out_rate,
-    ));
+    );
 
     // --- Detect jitter risk ---
     let likely_jittery = in_rate <= 24_000;
@@ -71,14 +71,14 @@ pub fn run(args: RunArgs) {
     let capacity = (target_fill * 4).max(callback_samples * 8);
     let (mut producer, mut consumer) = HeapRb::<f32>::new(capacity).split();
 
-    logging::stdout(format_args!(
+    crate::log_out!(
         "Input {} | callback {} frames | cushion {} samples (~{}ms) | buffer {} samples",
         if likely_jittery { "jittery" } else { "steady" },
         OUTPUT_BUFFER_FRAMES,
         target_fill,
         target_fill / samples_per_ms,
         capacity
-    ));
+    );
 
     // --- Gate: stays false until the buffer first builds the cushion
     let primed = Arc::new(AtomicBool::new(false));
@@ -91,6 +91,7 @@ pub fn run(args: RunArgs) {
 
     // --- Input callback: capture -> convert -> resample -> push ---
     let mut resampler = Resampler::new(in_rate, out_rate, out_channels);
+    let mut converted = vec![0.0; out_channels];
     let mut resampled: Vec<f32> = Vec::with_capacity(8192); // scratch, reused each call
 
     let input_callback = move |input: &[f32], _: &cpal::InputCallbackInfo| {
@@ -100,7 +101,7 @@ pub fn run(args: RunArgs) {
                 break; // ignore a trailing partial frame
             }
 
-            let converted = convert_frame(frame, in_channels, out_channels);
+            convert_frame(frame, in_channels, &mut converted);
 
             resampled.clear();
             resampler.process(&converted, &mut resampled);
@@ -146,38 +147,34 @@ pub fn run(args: RunArgs) {
 
     let input_error_device_description = input_device_description.clone();
     let mut restart_requested = false;
-    let input_stream = input_device
-        .build_input_stream(
-            in_config.into(),
-            input_callback,
-            move |err| {
-                logging::stderr(format_args!("input stream error: {}", err));
-                if err.kind() == ErrorKind::DeviceNotAvailable && !restart_requested {
-                    restart_requested = true;
-                    logging::stdout(format_args!(
-                        "input device disconnected: {}; attempting micpipe restart",
-                        input_error_device_description
-                    ));
-                    request_restart_after_disconnect();
-                }
-            },
-            None,
-        )
-        .unwrap();
+    let input_stream = input_device.build_input_stream(
+        in_config.into(),
+        input_callback,
+        move |err| {
+            crate::log_err!("input stream error: {}", err);
+            if err.kind() == ErrorKind::DeviceNotAvailable && !restart_requested {
+                restart_requested = true;
+                crate::log_out!(
+                    "input device disconnected: {}; attempting micpipe restart",
+                    input_error_device_description
+                );
+                request_restart_after_disconnect();
+            }
+        },
+        None,
+    )?;
 
-    let output_stream = output_device
-        .build_output_stream(
-            out_stream_config,
-            output_callback,
-            |err| logging::stderr(format_args!("output stream error: {}", err)),
-            None,
-        )
-        .unwrap();
+    let output_stream = output_device.build_output_stream(
+        out_stream_config,
+        output_callback,
+        |err| crate::log_err!("output stream error: {}", err),
+        None,
+    )?;
 
-    input_stream.play().unwrap();
-    output_stream.play().unwrap();
+    input_stream.play()?;
+    output_stream.play()?;
 
-    logging::stdout(format_args!("Mic -> BlackHole running..."));
+    crate::log_out!("Mic -> BlackHole running...");
 
     // --- Logger thread: prints occupancy once per second (off the audio thread) ---
     if args.debug {
@@ -186,10 +183,7 @@ pub fn run(args: RunArgs) {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 let occ = occupancy_log.load(Ordering::Relaxed);
                 let pct = (occ as f32 / capacity as f32) * 100.0;
-                logging::stdout(format_args!(
-                    "buffer: {} / {} samples ({:.1}%)",
-                    occ, capacity, pct
-                ));
+                crate::log_out!("buffer: {} / {} samples ({:.1}%)", occ, capacity, pct);
             }
         });
     }
@@ -201,16 +195,16 @@ pub fn run(args: RunArgs) {
 }
 
 fn request_restart_after_disconnect() {
-    logging::stderr(format_args!("requesting micpipe restart"));
+    crate::log_err!("requesting micpipe restart");
     std::thread::spawn(|| match service::restart_service() {
         Ok(status) if status.success() => {
-            logging::stderr(format_args!("micpipe restart requested"));
+            crate::log_err!("micpipe restart requested");
         }
         Ok(status) => {
-            logging::stderr(format_args!("micpipe restart failed: {}", status));
+            crate::log_err!("micpipe restart failed: {}", status);
         }
         Err(err) => {
-            logging::stderr(format_args!("failed to request micpipe restart: {}", err));
+            crate::log_err!("failed to request micpipe restart: {}", err);
         }
     });
 }
