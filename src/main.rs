@@ -1,5 +1,6 @@
 mod audio;
 mod cli;
+mod logging;
 mod resampler;
 mod router;
 mod service;

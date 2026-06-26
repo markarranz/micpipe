@@ -112,16 +112,17 @@ pub fn stop() {
 }
 
 pub fn restart() {
-    let status = ProcCommand::new("launchctl")
+    match restart_service() {
+        Ok(status) if status.success() => println!("{} restarted.", SERVICE_NAME),
+        Ok(_) => eprintln!("Failed to restart (is it installed and loaded?)."),
+        Err(err) => eprintln!("Failed to restart: {}", err),
+    }
+}
+
+pub fn restart_service() -> std::io::Result<std::process::ExitStatus> {
+    ProcCommand::new("launchctl")
         .args(["kickstart", "-k", &service_target()])
         .status()
-        .expect("failed to run launchctl");
-
-    if status.success() {
-        println!("{} restarted.", SERVICE_NAME);
-    } else {
-        eprintln!("Failed to restart (is it installed and loaded?).");
-    }
 }
 
 pub fn status() {
