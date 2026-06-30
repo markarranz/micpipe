@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 use cpal::{
@@ -27,6 +30,7 @@ const OUTPUT_BUFFER_FRAMES: u32 = 512;
 const STEADY_CUSHION_CALLBACKS: usize = 2;
 const JITTERY_EXTRA_MARGIN_MS: u32 = 50;
 const RESAMPLED_SCRATCH_CAPACITY: usize = 8192;
+const PINNED_INPUT_RECONNECT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn run(args: RunArgs) -> Result<()> {
     let restart_policy = RestartPolicy::from_args(&args);
@@ -89,17 +93,22 @@ pub fn run(args: RunArgs) -> Result<()> {
                 crate::log_err!("input stream error: {}", err);
                 if err.kind() == ErrorKind::DeviceNotAvailable && !restart_requested {
                     restart_requested = true;
-                    if restart_policy.restart_on_input_disconnect {
-                        crate::log_out!(
-                            "input device disconnected: {}; attempting micpipe restart",
-                            input_error_device_description
-                        );
-                        request_restart_after_disconnect();
-                    } else {
-                        crate::log_out!(
-                            "input device disconnected: {}; not restarting because a specific input device is configured",
-                            input_error_device_description
-                        );
+                    match &restart_policy {
+                        RestartPolicy::RestartOnDisconnect => {
+                            crate::log_out!(
+                                "input device disconnected: {}; attempting micpipe restart",
+                                input_error_device_description
+                            );
+                            request_restart_after_disconnect();
+                        }
+                        RestartPolicy::RestartOnPinnedInputReconnect { input } => {
+                            crate::log_out!(
+                                "input device disconnected: {}; waiting for pinned input device '{}' to reconnect before restarting",
+                                input_error_device_description,
+                                input
+                            );
+                            request_restart_when_pinned_input_reconnects(input.clone());
+                        }
                     }
                 }
             },
@@ -149,15 +158,19 @@ pub fn run(args: RunArgs) -> Result<()> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RestartPolicy {
-    restart_on_input_disconnect: bool,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RestartPolicy {
+    RestartOnDisconnect,
+    RestartOnPinnedInputReconnect { input: String },
 }
 
 impl RestartPolicy {
     fn from_args(args: &RunArgs) -> Self {
-        Self {
-            restart_on_input_disconnect: args.input.is_none(),
+        match &args.input {
+            Some(input) => Self::RestartOnPinnedInputReconnect {
+                input: input.clone(),
+            },
+            None => Self::RestartOnDisconnect,
         }
     }
 }
@@ -363,6 +376,28 @@ fn request_restart_after_disconnect() {
     });
 }
 
+fn request_restart_when_pinned_input_reconnects(input: String) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(PINNED_INPUT_RECONNECT_POLL_INTERVAL);
+            let Ok(device) = find_input_device(Some(&input)) else {
+                continue;
+            };
+
+            let device_description = device
+                .description()
+                .map(|description| description.to_string())
+                .unwrap_or_else(|_| input.clone());
+            crate::log_out!(
+                "pinned input device reconnected: {}; attempting micpipe restart",
+                device_description
+            );
+            request_restart_after_disconnect();
+            break;
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -455,17 +490,25 @@ mod tests {
             debug: false,
         };
 
-        assert!(RestartPolicy::from_args(&args).restart_on_input_disconnect);
+        assert_eq!(
+            RestartPolicy::from_args(&args),
+            RestartPolicy::RestartOnDisconnect
+        );
     }
 
     #[test]
-    fn restart_policy_does_not_restart_with_specific_input() {
+    fn restart_policy_restarts_when_pinned_input_reconnects() {
         let args = RunArgs {
             output: "BlackHole 2ch".to_string(),
             input: Some("MacBook Pro Microphone".to_string()),
             debug: false,
         };
 
-        assert!(!RestartPolicy::from_args(&args).restart_on_input_disconnect);
+        assert_eq!(
+            RestartPolicy::from_args(&args),
+            RestartPolicy::RestartOnPinnedInputReconnect {
+                input: "MacBook Pro Microphone".to_string()
+            }
+        );
     }
 }
