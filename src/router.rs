@@ -29,6 +29,7 @@ const JITTERY_EXTRA_MARGIN_MS: u32 = 50;
 const RESAMPLED_SCRATCH_CAPACITY: usize = 8192;
 
 pub fn run(args: RunArgs) -> Result<()> {
+    let restart_policy = RestartPolicy::from_args(&args);
     let route = AudioRoute::from_args(&args)?;
 
     crate::log_out!(
@@ -88,11 +89,18 @@ pub fn run(args: RunArgs) -> Result<()> {
                 crate::log_err!("input stream error: {}", err);
                 if err.kind() == ErrorKind::DeviceNotAvailable && !restart_requested {
                     restart_requested = true;
-                    crate::log_out!(
-                        "input device disconnected: {}; attempting micpipe restart",
-                        input_error_device_description
-                    );
-                    request_restart_after_disconnect();
+                    if restart_policy.restart_on_input_disconnect {
+                        crate::log_out!(
+                            "input device disconnected: {}; attempting micpipe restart",
+                            input_error_device_description
+                        );
+                        request_restart_after_disconnect();
+                    } else {
+                        crate::log_out!(
+                            "input device disconnected: {}; not restarting because a specific input device is configured",
+                            input_error_device_description
+                        );
+                    }
                 }
             },
             None,
@@ -138,6 +146,19 @@ pub fn run(args: RunArgs) -> Result<()> {
     // Park main forever so the streams stay alive.
     loop {
         std::thread::park();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RestartPolicy {
+    restart_on_input_disconnect: bool,
+}
+
+impl RestartPolicy {
+    fn from_args(args: &RunArgs) -> Self {
+        Self {
+            restart_on_input_disconnect: args.input.is_none(),
+        }
     }
 }
 
@@ -355,8 +376,10 @@ mod tests {
     };
 
     use super::{
-        BufferPlan, InputPipe, OUTPUT_BUFFER_FRAMES, OutputPipe, STEADY_CUSHION_CALLBACKS,
+        BufferPlan, InputPipe, OUTPUT_BUFFER_FRAMES, OutputPipe, RestartPolicy,
+        STEADY_CUSHION_CALLBACKS,
     };
+    use crate::cli::RunArgs;
 
     #[test]
     fn steady_buffer_plan_uses_two_callback_cushion() {
@@ -422,5 +445,27 @@ mod tests {
 
         assert_eq!(output, [0.25, 0.75]);
         assert_eq!(occupancy.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn restart_policy_restarts_when_tracking_default_input() {
+        let args = RunArgs {
+            output: "BlackHole 2ch".to_string(),
+            input: None,
+            debug: false,
+        };
+
+        assert!(RestartPolicy::from_args(&args).restart_on_input_disconnect);
+    }
+
+    #[test]
+    fn restart_policy_does_not_restart_with_specific_input() {
+        let args = RunArgs {
+            output: "BlackHole 2ch".to_string(),
+            input: Some("MacBook Pro Microphone".to_string()),
+            debug: false,
+        };
+
+        assert!(!RestartPolicy::from_args(&args).restart_on_input_disconnect);
     }
 }
