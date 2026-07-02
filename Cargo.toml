@@ -2,6 +2,7 @@
 name = "micpipe"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Run a macOS microphone-to-BlackHole audio router as a background service."
 repository = "https://github.com/markarranz/micpipe"
 readme = "README.md"
