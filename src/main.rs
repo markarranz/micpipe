@@ -11,7 +11,7 @@ use cli::{Cli, Command};
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("{}", err);
+        eprintln!("{err}");
         std::process::exit(1);
     }
 }

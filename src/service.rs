@@ -59,11 +59,10 @@ pub fn install(args: RunArgs) -> Result<()> {
         .context("failed to run launchctl bootstrap")?;
 
     if status.success() {
-        println!("{} service installed and started", SERVICE_NAME);
+        println!("{SERVICE_NAME} service installed and started");
     } else {
         return Err(error::message(format!(
-            "plist written, but bootstrap failed (it may already be loaded - try `{} restart`)",
-            SERVICE_NAME
+            "plist written, but bootstrap failed (it may already be loaded - try `{SERVICE_NAME} restart`)"
         )));
     }
     Ok(())
@@ -81,7 +80,7 @@ pub fn uninstall() -> Result<()> {
         println!("Removed {}", plist_path.display());
     }
 
-    println!("{} service uninstalled", SERVICE_NAME);
+    println!("{SERVICE_NAME} service uninstalled");
     Ok(())
 }
 
@@ -89,8 +88,7 @@ pub fn start() -> Result<()> {
     let plist_path = plist_path()?;
     if !plist_path.exists() {
         return Err(error::message(format!(
-            "Service not installed. Run `{} install` first.",
-            SERVICE_NAME
+            "Service not installed. Run `{SERVICE_NAME} install` first."
         )));
     }
 
@@ -105,7 +103,7 @@ pub fn start() -> Result<()> {
         .context("failed to run launchctl bootstrap")?;
 
     if status.success() {
-        println!("{} started.", SERVICE_NAME);
+        println!("{SERVICE_NAME} started.");
     } else {
         return Err(error::message(
             "Failed to start (it may already be running).",
@@ -127,7 +125,7 @@ pub fn stop() -> Result<()> {
         .context("failed to run launchctl bootout")?;
 
     if status.success() {
-        println!("{} stopped.", SERVICE_NAME);
+        println!("{SERVICE_NAME} stopped.");
     } else {
         return Err(error::message(
             "Failed to stop (it may not have been running).",
@@ -139,7 +137,7 @@ pub fn stop() -> Result<()> {
 pub fn restart() -> Result<()> {
     let status = restart_service()?;
     if status.success() {
-        println!("{} restarted.", SERVICE_NAME);
+        println!("{SERVICE_NAME} restarted.");
     } else {
         return Err(error::message(
             "Failed to restart (is it installed and loaded?).",
@@ -160,7 +158,7 @@ pub fn status() -> Result<()> {
     let plist_path = plist_path()?;
     if !plist_path.exists() {
         println!("not installed");
-        println!("run `{} install` to set up the service", SERVICE_NAME);
+        println!("run `{SERVICE_NAME} install` to set up the service");
         return Ok(());
     }
 
@@ -172,7 +170,7 @@ pub fn status() -> Result<()> {
     if !output.status.success() {
         println!("installed but not loaded");
         println!("plist: {}", plist_path.display());
-        println!("run `{} start` to load it", SERVICE_NAME);
+        println!("run `{SERVICE_NAME} start` to load it");
         return Ok(());
     }
 
@@ -187,11 +185,11 @@ pub fn status() -> Result<()> {
         .map(|c| c.trim());
 
     match pid {
-        Some(pid) => println!("running (pid {})", pid),
+        Some(pid) => println!("running (pid {pid})"),
         None => {
             print!("loaded, but not running");
             if let Some(code) = last_exit {
-                print!(" (last exit code {})", code);
+                print!(" (last exit code {code})");
             }
             println!();
         }
@@ -211,7 +209,7 @@ fn home() -> Result<PathBuf> {
 fn plist_path() -> Result<PathBuf> {
     Ok(home()?
         .join("Library/LaunchAgents")
-        .join(format!("{}.plist", SERVICE_LABEL)))
+        .join(format!("{SERVICE_LABEL}.plist")))
 }
 
 fn binary_path() -> Result<PathBuf> {
@@ -219,7 +217,7 @@ fn binary_path() -> Result<PathBuf> {
 }
 
 fn log_dir() -> Result<PathBuf> {
-    Ok(home()?.join(format!(".local/share/{}", SERVICE_NAME)))
+    Ok(home()?.join(format!(".local/share/{SERVICE_NAME}")))
 }
 
 fn current_uid() -> Result<String> {
