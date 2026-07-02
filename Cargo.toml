@@ -6,7 +6,7 @@ description = "Run a macOS microphone-to-BlackHole audio router as a background 
 repository = "https://github.com/markarranz/micpipe"
 readme = "README.md"
 license = "MIT"
-keywords = ["audio", "microphone", "blackhole", "macos"]
+keywords = ["audio", "audio-router", "microphone", "blackhole", "macos"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
 [dependencies]
