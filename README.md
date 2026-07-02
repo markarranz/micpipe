@@ -1,11 +1,11 @@
 # micpipe
 
-`micpipe` routes a macOS input device into a macOS output device. It is built
-for the common workflow of sending a microphone into `BlackHole 2ch`, then
-using BlackHole as the microphone source in another app.
+`micpipe` is a lightweight macOS audio router service for sending your
+microphone into `BlackHole 2ch` or another CoreAudio output. It is built for the
+common workflow of using BlackHole as the microphone source in another app while
+keeping the route alive in the background.
 
-It can run in the foreground while you are testing, or as a per-user `launchd`
-agent for day-to-day use.
+It can also run in the foreground while you are testing.
 
 ## Requirements
 

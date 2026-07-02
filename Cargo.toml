@@ -2,6 +2,11 @@
 name = "micpipe"
 version = "0.1.0"
 edition = "2024"
+description = "Run a macOS microphone-to-BlackHole audio router as a background service."
+repository = "https://github.com/markarranz/micpipe"
+readme = "README.md"
+keywords = ["audio", "microphone", "blackhole", "macos"]
+categories = ["command-line-utilities", "multimedia::audio"]
 
 [dependencies]
 cpal = "0.18"

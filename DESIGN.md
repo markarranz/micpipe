@@ -1,8 +1,8 @@
 # micpipe design
 
-`micpipe` is a small CoreAudio bridge. It captures samples from an input device,
-converts and resamples them to the selected output format, then writes them into
-an output device such as BlackHole.
+`micpipe` is a small CoreAudio routing service. It captures samples from an
+input device, converts and resamples them to the selected output format, then
+writes them into an output device such as BlackHole.
 
 ## Goals
 
