@@ -35,8 +35,8 @@ const JITTERY_EXTRA_MARGIN_MS: u32 = 50;
 const RESAMPLED_SCRATCH_CAPACITY: usize = 8192;
 const PINNED_INPUT_RECONNECT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-pub fn run(args: RunArgs) -> Result<()> {
-    let runtime = AudioRuntime::start(&args)?;
+pub fn run(args: &RunArgs) -> Result<()> {
+    let runtime = AudioRuntime::start(args)?;
     runtime.park();
 }
 
@@ -104,7 +104,6 @@ impl AudioRuntime {
             _default_input_change_listener: default_input_change_listener,
         })
     }
-
     fn park(mut self) -> ! {
         loop {
             match self.audio_control_receiver.recv() {
@@ -172,7 +171,7 @@ where
     route
         .input_device
         .build_input_stream(
-            route.input_config.clone(),
+            route.input_config,
             move |input: &[f32], _: &cpal::InputCallbackInfo| input_pipe.capture(input),
             input_error_callback(
                 restart_policy,
@@ -232,7 +231,7 @@ where
     route
         .output_device
         .build_output_stream(
-            route.output_config.clone(),
+            route.output_config,
             move |output: &mut [f32], _: &cpal::OutputCallbackInfo| output_pipe.fill(output),
             |err| crate::log_err!("output stream error: {}", err),
             None,
@@ -465,12 +464,11 @@ where
 
         // If we fully underrun, re-arm the gate so we rebuild the cushion instead of stuttering.
         for out_sample in output.iter_mut() {
-            match self.consumer.try_pop() {
-                Some(sample) => *out_sample = sample,
-                None => {
-                    *out_sample = 0.0;
-                    self.primed = false;
-                }
+            if let Some(sample) = self.consumer.try_pop() {
+                *out_sample = sample;
+            } else {
+                *out_sample = 0.0;
+                self.primed = false;
             }
         }
     }
@@ -580,8 +578,7 @@ fn request_restart_when_pinned_input_reconnects(input: String) {
 
             let device_description = device
                 .description()
-                .map(|description| description.to_string())
-                .unwrap_or_else(|_| input.clone());
+                .map_or_else(|_| input.clone(), |description| description.to_string());
             crate::log_out!(
                 "pinned input device reconnected: {}; attempting micpipe restart",
                 device_description

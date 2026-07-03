@@ -9,7 +9,7 @@ const SERVICE_NAME: &str = "micpipe";
 const SERVICE_LABEL: &str = "com.markarranz.micpipe";
 const PLIST_TEMPLATE: &str = include_str!("plist.template");
 
-pub fn install(args: RunArgs) -> Result<()> {
+pub fn install(args: &RunArgs) -> Result<()> {
     let log_dir = log_dir()?;
     std::fs::create_dir_all(&log_dir)
         .context(format!("could not create log dir {}", log_dir.display()))?;
@@ -169,21 +169,20 @@ pub fn status() -> Result<()> {
     let pid = text
         .lines()
         .find_map(|l| l.trim().strip_prefix("pid = "))
-        .map(|p| p.trim());
+        .map(str::trim);
     let last_exit = text
         .lines()
         .find_map(|l| l.trim().strip_prefix("last exit code = "))
-        .map(|c| c.trim());
+        .map(str::trim);
 
-    match pid {
-        Some(pid) => println!("running (pid {pid})"),
-        None => {
-            print!("loaded, but not running");
-            if let Some(code) = last_exit {
-                print!(" (last exit code {code})");
-            }
-            println!();
+    if let Some(pid) = pid {
+        println!("running (pid {pid})");
+    } else {
+        print!("loaded, but not running");
+        if let Some(code) = last_exit {
+            print!(" (last exit code {code})");
         }
+        println!();
     }
 
     println!("plist: {}", plist_path.display());
