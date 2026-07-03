@@ -1,6 +1,6 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 
-use crate::error::{OptionExt, Result, ResultExt};
+use anyhow::{Context, Result};
 
 /// Convert one input frame into one output frame.
 pub fn convert_frame(input: &[f32], in_ch: usize, output: &mut [f32]) {
