@@ -48,13 +48,16 @@ is created. A missing `--input` uses CPAL's default input device. A provided
 device descriptions.
 
 The input stream uses the device default input config. The output stream uses the
-device default output config, but requests a fixed CoreAudio output buffer size
-of 512 frames.
+device default output config, but prefers a 512-frame output buffer. When CPAL
+reports the selected output device's supported buffer range, `micpipe` clamps
+that preference into the device range before opening the stream. If the range is
+unknown, it falls back to requesting the preferred fixed size.
 
 ## Buffering
 
 The input and output callbacks communicate through a `ringbuf::HeapRb<f32>`.
-The buffer size is chosen by `BufferPlan`:
+The buffer size is chosen by `BufferPlan` from the output callback size selected
+during route setup:
 
 - A steady input gets a two-output-callback cushion.
 - Inputs at 24 kHz or below are treated as likely jittery and get an additional

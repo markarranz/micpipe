@@ -7,7 +7,7 @@ use std::{
 };
 
 use cpal::{
-    BufferSize, ErrorKind, StreamConfig,
+    BufferSize, ErrorKind, StreamConfig, SupportedBufferSize,
     traits::{DeviceTrait, StreamTrait},
 };
 
@@ -28,8 +28,8 @@ use crate::cli::RunArgs;
 #[cfg(target_os = "macos")]
 use crate::default_input_watcher::DefaultInputChangeListener;
 
-// CoreAudio's fixed buffer size.
-const OUTPUT_BUFFER_FRAMES: u32 = 512;
+// Preferred output callback size. The selected output device may clamp this.
+const REQUESTED_OUTPUT_BUFFER_FRAMES: u32 = 512;
 const STEADY_CUSHION_CALLBACKS: usize = 2;
 const JITTERY_EXTRA_MARGIN_MS: u32 = 50;
 const RESAMPLED_SCRATCH_CAPACITY: usize = 8192;
@@ -55,7 +55,12 @@ impl AudioRuntime {
         let route = AudioRoute::from_args(args)?;
         log_route(&route);
 
-        let buffer_plan = BufferPlan::new(route.in_rate, route.out_rate, route.out_channels);
+        let buffer_plan = BufferPlan::new(
+            route.in_rate,
+            route.out_rate,
+            route.out_channels,
+            route.output_buffer_frames,
+        );
         let (producer, consumer) = HeapRb::<f32>::new(buffer_plan.capacity).split();
         log_buffer_plan(buffer_plan);
 
@@ -133,17 +138,45 @@ fn log_route(route: &AudioRoute) {
         route.out_channels,
         route.out_rate,
     );
+
+    match route.output_buffer_support {
+        OutputBufferSupport::Range { min, max }
+            if route.output_buffer_frames == REQUESTED_OUTPUT_BUFFER_FRAMES =>
+        {
+            crate::log_out!(
+                "Output buffer: requested/chosen {} frames (device range {}-{} frames)",
+                route.output_buffer_frames,
+                min,
+                max
+            );
+        }
+        OutputBufferSupport::Range { min, max } => {
+            crate::log_out!(
+                "Output buffer: requested {} frames, chosen {} frames (device range {}-{} frames)",
+                REQUESTED_OUTPUT_BUFFER_FRAMES,
+                route.output_buffer_frames,
+                min,
+                max
+            );
+        }
+        OutputBufferSupport::Unknown => {
+            crate::log_out!(
+                "Output buffer: requested/chosen {} frames (device range unknown; using fixed-size fallback)",
+                route.output_buffer_frames
+            );
+        }
+    }
 }
 
 fn log_buffer_plan(buffer_plan: BufferPlan) {
     crate::log_out!(
-        "Input {} | callback {} frames | cushion {} samples (~{}ms) | buffer {} samples",
+        "Input {} | output callback {} frames | cushion {} samples (~{}ms) | buffer {} samples",
         if buffer_plan.likely_jittery {
             "jittery"
         } else {
             "steady"
         },
-        OUTPUT_BUFFER_FRAMES,
+        buffer_plan.output_buffer_frames,
         buffer_plan.target_fill,
         buffer_plan.target_fill / buffer_plan.samples_per_ms,
         buffer_plan.capacity
@@ -332,6 +365,8 @@ struct AudioRoute {
     output_description: String,
     out_channels: usize,
     out_rate: u32,
+    output_buffer_frames: u32,
+    output_buffer_support: OutputBufferSupport,
 }
 
 impl AudioRoute {
@@ -353,6 +388,10 @@ impl AudioRoute {
             .context("failed to get output device default config")?;
         let out_channels = output_config.channels() as usize;
         let out_rate = output_config.sample_rate();
+        let output_buffer_selection = choose_output_buffer_frames(
+            output_config.buffer_size(),
+            REQUESTED_OUTPUT_BUFFER_FRAMES,
+        );
         let output_description = output_device
             .description()
             .context("failed to describe output device")?
@@ -360,7 +399,7 @@ impl AudioRoute {
 
         let input_config = input_config.into();
         let mut output_config: StreamConfig = output_config.into();
-        output_config.buffer_size = BufferSize::Fixed(OUTPUT_BUFFER_FRAMES);
+        output_config.buffer_size = BufferSize::Fixed(output_buffer_selection.frames);
 
         Ok(Self {
             input_device,
@@ -373,7 +412,37 @@ impl AudioRoute {
             output_description,
             out_channels,
             out_rate,
+            output_buffer_frames: output_buffer_selection.frames,
+            output_buffer_support: output_buffer_selection.support,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutputBufferSelection {
+    frames: u32,
+    support: OutputBufferSupport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputBufferSupport {
+    Range { min: u32, max: u32 },
+    Unknown,
+}
+
+fn choose_output_buffer_frames(
+    supported: &SupportedBufferSize,
+    requested: u32,
+) -> OutputBufferSelection {
+    match *supported {
+        SupportedBufferSize::Range { min, max } => OutputBufferSelection {
+            frames: requested.clamp(min, max),
+            support: OutputBufferSupport::Range { min, max },
+        },
+        SupportedBufferSize::Unknown => OutputBufferSelection {
+            frames: requested,
+            support: OutputBufferSupport::Unknown,
+        },
     }
 }
 
@@ -478,15 +547,16 @@ where
 struct BufferPlan {
     likely_jittery: bool,
     samples_per_ms: usize,
+    output_buffer_frames: u32,
     target_fill: usize,
     capacity: usize,
 }
 
 impl BufferPlan {
-    fn new(in_rate: u32, out_rate: u32, out_channels: usize) -> Self {
+    fn new(in_rate: u32, out_rate: u32, out_channels: usize, output_buffer_frames: u32) -> Self {
         let likely_jittery = in_rate <= 24_000;
         let samples_per_ms = ((out_rate as usize * out_channels) / 1_000).max(1);
-        let callback_samples = OUTPUT_BUFFER_FRAMES as usize * out_channels;
+        let callback_samples = output_buffer_frames as usize * out_channels;
         let jitter_extra = if likely_jittery {
             JITTERY_EXTRA_MARGIN_MS as usize * samples_per_ms
         } else {
@@ -500,6 +570,7 @@ impl BufferPlan {
         Self {
             likely_jittery,
             samples_per_ms,
+            output_buffer_frames,
             target_fill,
             capacity,
         }
@@ -596,23 +667,26 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    use cpal::SupportedBufferSize;
     use ringbuf::{
         HeapRb,
         traits::{Consumer, Producer, Split},
     };
 
     use super::{
-        AudioDisconnectAction, BufferPlan, InputPipe, OUTPUT_BUFFER_FRAMES, OutputPipe,
-        RestartPolicy, STEADY_CUSHION_CALLBACKS,
+        AudioDisconnectAction, BufferPlan, InputPipe, OutputBufferSupport, OutputPipe,
+        RestartPolicy, STEADY_CUSHION_CALLBACKS, choose_output_buffer_frames,
     };
     use crate::cli::RunArgs;
 
     #[test]
     fn steady_buffer_plan_uses_two_callback_cushion() {
-        let plan = BufferPlan::new(48_000, 48_000, 2);
-        let callback_samples = OUTPUT_BUFFER_FRAMES as usize * 2;
+        let output_buffer_frames = 256;
+        let plan = BufferPlan::new(48_000, 48_000, 2, output_buffer_frames);
+        let callback_samples = output_buffer_frames as usize * 2;
 
         assert!(!plan.likely_jittery);
+        assert_eq!(plan.output_buffer_frames, output_buffer_frames);
         assert_eq!(
             plan.target_fill,
             STEADY_CUSHION_CALLBACKS * callback_samples
@@ -622,12 +696,61 @@ mod tests {
 
     #[test]
     fn jittery_buffer_plan_adds_extra_margin() {
-        let plan = BufferPlan::new(16_000, 48_000, 2);
+        let output_buffer_frames = 256;
+        let plan = BufferPlan::new(16_000, 48_000, 2, output_buffer_frames);
+        let callback_samples = output_buffer_frames as usize * 2;
 
         assert!(plan.likely_jittery);
         assert_eq!(plan.samples_per_ms, 96);
-        assert_eq!(plan.target_fill, 2_048 + 4_800);
+        assert_eq!(
+            plan.target_fill,
+            STEADY_CUSHION_CALLBACKS * callback_samples + 4_800
+        );
         assert_eq!(plan.capacity, plan.target_fill * 4);
+    }
+
+    #[test]
+    fn output_buffer_selection_uses_requested_frames_inside_device_range() {
+        let selection = choose_output_buffer_frames(
+            &SupportedBufferSize::Range {
+                min: 128,
+                max: 1024,
+            },
+            512,
+        );
+
+        assert_eq!(selection.frames, 512);
+        assert_eq!(
+            selection.support,
+            OutputBufferSupport::Range {
+                min: 128,
+                max: 1024
+            }
+        );
+    }
+
+    #[test]
+    fn output_buffer_selection_clamps_to_device_range() {
+        let too_small = choose_output_buffer_frames(
+            &SupportedBufferSize::Range {
+                min: 1024,
+                max: 2048,
+            },
+            512,
+        );
+        let too_large =
+            choose_output_buffer_frames(&SupportedBufferSize::Range { min: 128, max: 256 }, 512);
+
+        assert_eq!(too_small.frames, 1024);
+        assert_eq!(too_large.frames, 256);
+    }
+
+    #[test]
+    fn output_buffer_selection_falls_back_to_requested_frames_for_unknown_range() {
+        let selection = choose_output_buffer_frames(&SupportedBufferSize::Unknown, 512);
+
+        assert_eq!(selection.frames, 512);
+        assert_eq!(selection.support, OutputBufferSupport::Unknown);
     }
 
     #[test]
