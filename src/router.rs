@@ -35,10 +35,71 @@ const RESAMPLED_SCRATCH_CAPACITY: usize = 8192;
 const PINNED_INPUT_RECONNECT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn run(args: RunArgs) -> Result<()> {
-    let restart_policy = RestartPolicy::from_args(&args);
-    let tracks_default_input = matches!(restart_policy, RestartPolicy::RestartOnDisconnect);
-    let route = AudioRoute::from_args(&args)?;
+    let runtime = AudioRuntime::start(&args)?;
+    runtime.park();
+}
 
+struct AudioRuntime {
+    _input_stream: cpal::Stream,
+    _output_stream: cpal::Stream,
+    #[cfg(target_os = "macos")]
+    _default_input_change_listener: Option<DefaultInputChangeListener>,
+}
+
+impl AudioRuntime {
+    fn start(args: &RunArgs) -> Result<Self> {
+        let restart_policy = RestartPolicy::from_args(args);
+        let route = AudioRoute::from_args(args)?;
+        log_route(&route);
+
+        let buffer_plan = BufferPlan::new(route.in_rate, route.out_rate, route.out_channels);
+        let (producer, consumer) = HeapRb::<f32>::new(buffer_plan.capacity).split();
+        log_buffer_plan(buffer_plan);
+
+        // Clock-drift instrumentation: shared buffer-occupancy gauge.
+        let occupancy = Arc::new(AtomicUsize::new(0));
+        let restart_requested = Arc::new(AtomicBool::new(false));
+
+        let input_stream = build_input_stream(
+            &route,
+            producer,
+            restart_policy.clone(),
+            Arc::clone(&restart_requested),
+        )?;
+        let output_stream =
+            build_output_stream(&route, consumer, buffer_plan, Arc::clone(&occupancy))?;
+
+        input_stream
+            .play()
+            .context("failed to start input stream")?;
+        output_stream
+            .play()
+            .context("failed to start output stream")?;
+
+        crate::log_out!("Mic -> BlackHole running...");
+
+        #[cfg(target_os = "macos")]
+        let default_input_change_listener =
+            watch_default_input_changes_when_needed(&route, &restart_policy, restart_requested)?;
+
+        spawn_buffer_logger(args.debug, occupancy, buffer_plan);
+
+        Ok(Self {
+            _input_stream: input_stream,
+            _output_stream: output_stream,
+            #[cfg(target_os = "macos")]
+            _default_input_change_listener: default_input_change_listener,
+        })
+    }
+
+    fn park(self) -> ! {
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
+fn log_route(route: &AudioRoute) {
     crate::log_out!(
         "Routing: {} ({}ch@{}Hz) -> {} ({}ch@{}Hz)",
         route.input_description,
@@ -48,10 +109,9 @@ pub fn run(args: RunArgs) -> Result<()> {
         route.out_channels,
         route.out_rate,
     );
+}
 
-    let buffer_plan = BufferPlan::new(route.in_rate, route.out_rate, route.out_channels);
-    let (producer, consumer) = HeapRb::<f32>::new(buffer_plan.capacity).split();
-
+fn log_buffer_plan(buffer_plan: BufferPlan) {
     crate::log_out!(
         "Input {} | callback {} frames | cushion {} samples (~{}ms) | buffer {} samples",
         if buffer_plan.likely_jittery {
@@ -64,11 +124,17 @@ pub fn run(args: RunArgs) -> Result<()> {
         buffer_plan.target_fill / buffer_plan.samples_per_ms,
         buffer_plan.capacity
     );
+}
 
-    // Clock-drift instrumentation: shared buffer-occupancy gauge.
-    let occupancy = Arc::new(AtomicUsize::new(0));
-    let occupancy_log = Arc::clone(&occupancy); // moves into the logger thread
-
+fn build_input_stream<P>(
+    route: &AudioRoute,
+    producer: P,
+    restart_policy: RestartPolicy,
+    restart_requested: Arc<AtomicBool>,
+) -> Result<cpal::Stream>
+where
+    P: Producer<Item = f32> + Send + 'static,
+{
     let mut input_pipe = InputPipe::new(
         producer,
         route.in_channels,
@@ -76,105 +142,112 @@ pub fn run(args: RunArgs) -> Result<()> {
         route.out_rate,
         route.out_channels,
     );
-    let input_callback = move |input: &[f32], _: &cpal::InputCallbackInfo| {
-        input_pipe.capture(input);
-    };
 
-    let mut output_pipe = OutputPipe::new(consumer, buffer_plan.target_fill, occupancy);
-    let output_callback = move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-        output_pipe.fill(output);
-    };
-
-    let restart_requested = Arc::new(AtomicBool::new(false));
-    let current_input_description = route.input_description.clone();
-    let input_error_device_description = route.input_description.clone();
-    let input_error_restart_requested = Arc::clone(&restart_requested);
-    let input_stream = route
+    route
         .input_device
         .build_input_stream(
-            route.input_config,
-            input_callback,
-            move |err| {
-                crate::log_err!("input stream error: {}", err);
-                if err.kind() == ErrorKind::DeviceNotAvailable
-                    && !input_error_restart_requested.swap(true, Ordering::Relaxed)
-                {
-                    match &restart_policy {
-                        RestartPolicy::RestartOnDisconnect => {
-                            crate::log_out!(
-                                "input device disconnected: {}; attempting micpipe restart",
-                                input_error_device_description
-                            );
-                            request_service_restart();
-                        }
-                        RestartPolicy::RestartOnPinnedInputReconnect { input } => {
-                            crate::log_out!(
-                                "input device disconnected: {}; waiting for pinned input device '{}' to reconnect before restarting",
-                                input_error_device_description,
-                                input
-                            );
-                            request_restart_when_pinned_input_reconnects(
-                                input.clone(),
-                                Arc::clone(&input_error_restart_requested),
-                            );
-                        }
-                    }
-                }
-            },
+            route.input_config.clone(),
+            move |input: &[f32], _: &cpal::InputCallbackInfo| input_pipe.capture(input),
+            input_error_callback(
+                restart_policy,
+                route.input_description.clone(),
+                restart_requested,
+            ),
             None,
         )
-        .context("failed to build input stream")?;
+        .context("failed to build input stream")
+}
 
-    let output_stream = route
+fn input_error_callback(
+    restart_policy: RestartPolicy,
+    input_device_description: String,
+    restart_requested: Arc<AtomicBool>,
+) -> impl FnMut(cpal::Error) + Send + 'static {
+    move |err| {
+        crate::log_err!("input stream error: {}", err);
+        if err.kind() == ErrorKind::DeviceNotAvailable
+            && !restart_requested.swap(true, Ordering::Relaxed)
+        {
+            match &restart_policy {
+                RestartPolicy::RestartOnDisconnect => {
+                    crate::log_out!(
+                        "input device disconnected: {}; attempting micpipe restart",
+                        input_device_description
+                    );
+                    request_service_restart();
+                }
+                RestartPolicy::RestartOnPinnedInputReconnect { input } => {
+                    crate::log_out!(
+                        "input device disconnected: {}; waiting for pinned input device '{}' to reconnect before restarting",
+                        input_device_description,
+                        input
+                    );
+                    request_restart_when_pinned_input_reconnects(
+                        input.clone(),
+                        Arc::clone(&restart_requested),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn build_output_stream<C>(
+    route: &AudioRoute,
+    consumer: C,
+    buffer_plan: BufferPlan,
+    occupancy: Arc<AtomicUsize>,
+) -> Result<cpal::Stream>
+where
+    C: Consumer<Item = f32> + Send + 'static,
+{
+    let mut output_pipe = OutputPipe::new(consumer, buffer_plan.target_fill, occupancy);
+
+    route
         .output_device
         .build_output_stream(
-            route.output_config,
-            output_callback,
+            route.output_config.clone(),
+            move |output: &mut [f32], _: &cpal::OutputCallbackInfo| output_pipe.fill(output),
             |err| crate::log_err!("output stream error: {}", err),
             None,
         )
-        .context("failed to build output stream")?;
+        .context("failed to build output stream")
+}
 
-    input_stream
-        .play()
-        .context("failed to start input stream")?;
-    output_stream
-        .play()
-        .context("failed to start output stream")?;
-
-    crate::log_out!("Mic -> BlackHole running...");
-
-    #[cfg(target_os = "macos")]
-    let _default_input_change_listener = if tracks_default_input {
-        Some(watch_default_input_changes(
-            current_input_description,
-            Arc::clone(&restart_requested),
-        )?)
-    } else {
-        None
-    };
-
-    // Logger thread prints occupancy once per second off the audio thread.
-    if args.debug {
-        std::thread::spawn(move || {
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                let occ = occupancy_log.load(Ordering::Relaxed);
-                let pct = (occ as f32 / buffer_plan.capacity as f32) * 100.0;
-                crate::log_out!(
-                    "buffer: {} / {} samples ({:.1}%)",
-                    occ,
-                    buffer_plan.capacity,
-                    pct
-                );
-            }
-        });
+#[cfg(target_os = "macos")]
+fn watch_default_input_changes_when_needed(
+    route: &AudioRoute,
+    restart_policy: &RestartPolicy,
+    restart_requested: Arc<AtomicBool>,
+) -> Result<Option<DefaultInputChangeListener>> {
+    if matches!(restart_policy, RestartPolicy::RestartOnDisconnect) {
+        return Ok(Some(watch_default_input_changes(
+            route.input_description.clone(),
+            restart_requested,
+        )?));
     }
 
-    // Park main forever so the streams stay alive.
-    loop {
-        std::thread::park();
+    Ok(None)
+}
+
+fn spawn_buffer_logger(debug: bool, occupancy: Arc<AtomicUsize>, buffer_plan: BufferPlan) {
+    if !debug {
+        return;
     }
+
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let occ = occupancy.load(Ordering::Relaxed);
+            let pct = (occ as f32 / buffer_plan.capacity as f32) * 100.0;
+            crate::log_out!(
+                "buffer: {} / {} samples ({:.1}%)",
+                occ,
+                buffer_plan.capacity,
+                pct
+            );
+        }
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
