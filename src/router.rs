@@ -169,21 +169,21 @@ fn input_error_callback(
             && !restart_requested.swap(true, Ordering::Relaxed)
         {
             match &restart_policy {
-                RestartPolicy::RestartOnDisconnect => {
+                RestartPolicy::FollowDefaultInput => {
                     crate::log_out!(
                         "input device disconnected: {}; attempting micpipe restart",
                         input_device_description
                     );
                     request_service_restart();
                 }
-                RestartPolicy::RestartOnPinnedInputReconnect { input } => {
+                RestartPolicy::PinnedInput { name } => {
                     crate::log_out!(
                         "input device disconnected: {}; waiting for pinned input device '{}' to reconnect before restarting",
                         input_device_description,
-                        input
+                        name
                     );
                     request_restart_when_pinned_input_reconnects(
-                        input.clone(),
+                        name.clone(),
                         Arc::clone(&restart_requested),
                     );
                 }
@@ -220,7 +220,7 @@ fn watch_default_input_changes_when_needed(
     restart_policy: &RestartPolicy,
     restart_requested: Arc<AtomicBool>,
 ) -> Result<Option<DefaultInputChangeListener>> {
-    if matches!(restart_policy, RestartPolicy::RestartOnDisconnect) {
+    if matches!(restart_policy, RestartPolicy::FollowDefaultInput) {
         return Ok(Some(watch_default_input_changes(
             route.input_description.clone(),
             restart_requested,
@@ -252,17 +252,17 @@ fn spawn_buffer_logger(debug: bool, occupancy: Arc<AtomicUsize>, buffer_plan: Bu
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RestartPolicy {
-    RestartOnDisconnect,
-    RestartOnPinnedInputReconnect { input: String },
+    FollowDefaultInput,
+    PinnedInput { name: String },
 }
 
 impl RestartPolicy {
     fn from_args(args: &RunArgs) -> Self {
         match &args.input {
-            Some(input) => Self::RestartOnPinnedInputReconnect {
-                input: input.clone(),
+            Some(input) => Self::PinnedInput {
+                name: input.clone(),
             },
-            None => Self::RestartOnDisconnect,
+            None => Self::FollowDefaultInput,
         }
     }
 }
@@ -626,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_policy_restarts_when_tracking_default_input() {
+    fn restart_policy_follows_default_input() {
         let args = RunArgs {
             output: "BlackHole 2ch".to_string(),
             input: None,
@@ -635,12 +635,12 @@ mod tests {
 
         assert_eq!(
             RestartPolicy::from_args(&args),
-            RestartPolicy::RestartOnDisconnect
+            RestartPolicy::FollowDefaultInput
         );
     }
 
     #[test]
-    fn restart_policy_restarts_when_pinned_input_reconnects() {
+    fn restart_policy_pins_input_by_name() {
         let args = RunArgs {
             output: "BlackHole 2ch".to_string(),
             input: Some("MacBook Pro Microphone".to_string()),
@@ -649,8 +649,8 @@ mod tests {
 
         assert_eq!(
             RestartPolicy::from_args(&args),
-            RestartPolicy::RestartOnPinnedInputReconnect {
-                input: "MacBook Pro Microphone".to_string()
+            RestartPolicy::PinnedInput {
+                name: "MacBook Pro Microphone".to_string()
             }
         );
     }
