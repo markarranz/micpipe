@@ -35,8 +35,8 @@ impl Resampler {
 
         while self.position < 1.0 {
             let frac = self.position;
-            for c in 0..self.channels {
-                let sample = self.prev[c] * (1.0 - frac) + self.next[c] * frac;
+            for (&prev, &next) in self.prev.iter().zip(&self.next) {
+                let sample = prev * (1.0 - frac) + next * frac;
                 out.push(sample);
             }
             self.position += self.ratio;
