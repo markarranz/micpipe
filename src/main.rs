@@ -1,5 +1,7 @@
 mod audio;
 mod cli;
+#[cfg(target_os = "macos")]
+mod default_input_watcher;
 mod error;
 mod logging;
 mod resampler;

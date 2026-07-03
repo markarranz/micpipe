@@ -9,7 +9,8 @@ writes them into an output device such as BlackHole.
 - Keep the audio callbacks non-blocking.
 - Avoid per-frame allocation in the hot path.
 - Run cleanly as a per-user `launchd` service.
-- Recover from input-device disconnects in the mode the user configured.
+- Recover from input-device changes or disconnects in the mode the user
+  configured.
 - Keep the implementation explicit and testable without adding a large
   framework.
 
@@ -26,6 +27,8 @@ router -> CPAL input stream -> InputPipe -> ring buffer -> OutputPipe -> CPAL ou
 ## Modules
 
 - `src/cli.rs`: subcommands and shared run/install arguments.
+- `src/default_input_watcher.rs`: macOS Core Audio listener for default input
+  device changes.
 - `src/service.rs`: install, uninstall, start, stop, restart, status, plist
   rendering, and `launchctl` calls.
 - `src/audio.rs`: CPAL device lookup and frame channel conversion.
@@ -93,7 +96,7 @@ out_rate` for each emitted output frame.
 This is intentionally simple. It is good enough for a microphone-monitoring
 utility, but it is not meant to be a studio-quality sample-rate converter.
 
-## Disconnect recovery
+## Input recovery
 
 Input stream errors are always written to `err.log`. When CPAL reports
 `ErrorKind::DeviceNotAvailable`, the input error callback also writes a
@@ -103,12 +106,18 @@ captured during route setup.
 The restart policy depends on how input was configured:
 
 - Default input mode: if `--input` was omitted, `micpipe` immediately requests
-  `micpipe restart` through the installed `launchd` service.
+  `micpipe restart` through the installed `launchd` service when the current
+  input disconnects. On macOS it also registers a Core Audio listener for
+  `kAudioHardwarePropertyDefaultInputDevice`, so a manual system default-input
+  change triggers the same restart path without waiting for a disconnect.
 - Pinned input mode: if `--input` was provided, `micpipe` starts a watcher
   thread that checks every 5 seconds for a matching input device. Once the
   pinned input reappears, it requests the service restart.
 
 Restart requests are made on helper threads, not inside the CPAL callback.
+Default input change notifications are deduplicated with disconnect-triggered
+restart requests so the service is asked to restart only once for the first
+recovery event.
 
 Output stream errors are logged only. There is no output-device reconnect
 policy today.
@@ -154,8 +163,9 @@ The steady-state runtime has:
 - CPAL's input callback.
 - CPAL's output callback.
 - An optional debug logger thread.
-- A restart thread for immediate default-input recovery, or a reconnect watcher
-  thread for pinned-input recovery.
+- A restart thread for immediate default-input recovery, a Core Audio listener
+  thread for default-input changes, or a reconnect watcher thread for
+  pinned-input recovery.
 
 The audio callbacks do not take mutexes, call `launchctl`, enumerate devices, or
 sleep. Shared debug state is a single relaxed atomic occupancy value.
@@ -179,6 +189,8 @@ owning real audio devices:
 - Device pinning uses description substring matching, not stable CoreAudio
   device IDs.
 - Pinned-device reconnect detection is polling based, with a 5 second interval.
+- Default-input change detection is macOS-specific and uses Core Audio HAL
+  property notifications.
 - Output disconnects do not trigger restart or reconnect handling.
 - The main run loop parks forever; shutdown is currently handled by process
   termination or `launchd`.

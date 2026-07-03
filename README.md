@@ -12,6 +12,7 @@ It can also run in the foreground while you are testing.
 - Routes one input device to one output device.
 - Runs as a per-user `launchd` service.
 - Follows the system default input, or pins a specific input by name.
+- Restarts automatically when the system default input changes.
 - Restarts automatically when the default input disconnects.
 - Waits for a pinned input to reconnect, then restarts automatically.
 
@@ -85,7 +86,8 @@ micpipe run --debug
 
 - Send your mic into BlackHole so another app can select BlackHole as its input.
 - Keep that route alive as a background service.
-- Follow whichever microphone is currently the macOS default.
+- Follow whichever microphone is currently the macOS default, including manual
+  default-input changes.
 - Pin a USB or external microphone and restart only after that same device
   reconnects.
 
@@ -116,8 +118,9 @@ micpipe uninstall
 `--input` is optional:
 
 - Without `--input`, `micpipe` follows the system default input device.
-  If that input disconnects, `micpipe` logs that the input device was
-  disconnected and immediately asks the installed service to restart.
+  If the system default input changes, or if the current default input
+  disconnects, `micpipe` logs the change and immediately asks the installed
+  service to restart.
 - With `--input`, `micpipe` pins that input by case-insensitive substring.
   If the pinned input disconnects, `micpipe` logs the disconnected device, polls
   every 5 seconds until that input appears again, then asks the installed
@@ -181,6 +184,12 @@ When the default input disconnects, `out.log` includes a recovery message like:
 [2026-06-29T13:04:05-07:00] input device disconnected: MacBook Pro Microphone; attempting micpipe restart
 ```
 
+When the system default input changes without a disconnect, `out.log` includes:
+
+```text
+[2026-06-29T13:04:05-07:00] default input changed: MacBook Pro Microphone -> USB Microphone; attempting micpipe restart
+```
+
 When a pinned input disconnects, `out.log` records that `micpipe` is waiting for
 that device before restarting:
 
@@ -217,11 +226,12 @@ micpipe start
 micpipe status
 ```
 
-### Logs show input device disconnected
+### Logs show input changed or disconnected
 
 If you are following the default input, `micpipe` attempts an immediate service
-restart. If you pinned an input with `--input`, reconnect that same device;
-`micpipe` polls every 5 seconds and restarts after it appears again.
+restart when the default changes or disconnects. If you pinned an input with
+`--input`, reconnect that same device; `micpipe` polls every 5 seconds and
+restarts after it appears again.
 
 ### Route arguments changed
 

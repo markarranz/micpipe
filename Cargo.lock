@@ -393,6 +393,7 @@ dependencies = [
  "clap",
  "cpal",
  "libc",
+ "objc2-core-audio",
  "ringbuf",
 ]
 

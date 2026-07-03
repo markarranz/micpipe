@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -24,6 +24,8 @@ use crate::{
 };
 
 use crate::cli::RunArgs;
+#[cfg(target_os = "macos")]
+use crate::default_input_watcher::DefaultInputChangeListener;
 
 // CoreAudio's fixed buffer size.
 const OUTPUT_BUFFER_FRAMES: u32 = 512;
@@ -34,6 +36,7 @@ const PINNED_INPUT_RECONNECT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn run(args: RunArgs) -> Result<()> {
     let restart_policy = RestartPolicy::from_args(&args);
+    let tracks_default_input = matches!(restart_policy, RestartPolicy::RestartOnDisconnect);
     let route = AudioRoute::from_args(&args)?;
 
     crate::log_out!(
@@ -82,8 +85,10 @@ pub fn run(args: RunArgs) -> Result<()> {
         output_pipe.fill(output);
     };
 
+    let restart_requested = Arc::new(AtomicBool::new(false));
+    let current_input_description = route.input_description.clone();
     let input_error_device_description = route.input_description.clone();
-    let mut restart_requested = false;
+    let input_error_restart_requested = Arc::clone(&restart_requested);
     let input_stream = route
         .input_device
         .build_input_stream(
@@ -91,15 +96,16 @@ pub fn run(args: RunArgs) -> Result<()> {
             input_callback,
             move |err| {
                 crate::log_err!("input stream error: {}", err);
-                if err.kind() == ErrorKind::DeviceNotAvailable && !restart_requested {
-                    restart_requested = true;
+                if err.kind() == ErrorKind::DeviceNotAvailable
+                    && !input_error_restart_requested.swap(true, Ordering::Relaxed)
+                {
                     match &restart_policy {
                         RestartPolicy::RestartOnDisconnect => {
                             crate::log_out!(
                                 "input device disconnected: {}; attempting micpipe restart",
                                 input_error_device_description
                             );
-                            request_restart_after_disconnect();
+                            request_service_restart();
                         }
                         RestartPolicy::RestartOnPinnedInputReconnect { input } => {
                             crate::log_out!(
@@ -107,7 +113,10 @@ pub fn run(args: RunArgs) -> Result<()> {
                                 input_error_device_description,
                                 input
                             );
-                            request_restart_when_pinned_input_reconnects(input.clone());
+                            request_restart_when_pinned_input_reconnects(
+                                input.clone(),
+                                Arc::clone(&input_error_restart_requested),
+                            );
                         }
                     }
                 }
@@ -134,6 +143,16 @@ pub fn run(args: RunArgs) -> Result<()> {
         .context("failed to start output stream")?;
 
     crate::log_out!("Mic -> BlackHole running...");
+
+    #[cfg(target_os = "macos")]
+    let _default_input_change_listener = if tracks_default_input {
+        Some(watch_default_input_changes(
+            current_input_description,
+            Arc::clone(&restart_requested),
+        )?)
+    } else {
+        None
+    };
 
     // Logger thread prints occupancy once per second off the audio thread.
     if args.debug {
@@ -361,7 +380,7 @@ impl BufferPlan {
     }
 }
 
-fn request_restart_after_disconnect() {
+fn request_service_restart() {
     crate::log_err!("requesting micpipe restart");
     std::thread::spawn(|| match service::restart_service() {
         Ok(status) if status.success() => {
@@ -376,13 +395,64 @@ fn request_restart_after_disconnect() {
     });
 }
 
-fn request_restart_when_pinned_input_reconnects(input: String) {
+#[cfg(target_os = "macos")]
+fn watch_default_input_changes(
+    current_input_description: String,
+    restart_requested: Arc<AtomicBool>,
+) -> Result<DefaultInputChangeListener> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let listener = DefaultInputChangeListener::new(sender)?;
+
+    std::thread::spawn(move || {
+        for () in receiver {
+            let default_input_description = match default_input_description() {
+                Ok(description) => description,
+                Err(err) => {
+                    crate::log_err!("failed to inspect default input device change: {}", err);
+                    continue;
+                }
+            };
+
+            if default_input_description == current_input_description {
+                continue;
+            }
+
+            if restart_requested.swap(true, Ordering::Relaxed) {
+                break;
+            }
+
+            crate::log_out!(
+                "default input changed: {} -> {}; attempting micpipe restart",
+                current_input_description,
+                default_input_description
+            );
+            request_service_restart();
+            break;
+        }
+    });
+
+    Ok(listener)
+}
+
+#[cfg(target_os = "macos")]
+fn default_input_description() -> Result<String> {
+    Ok(find_input_device(None)?
+        .description()
+        .context("failed to describe default input device")?
+        .to_string())
+}
+
+fn request_restart_when_pinned_input_reconnects(input: String, restart_requested: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(PINNED_INPUT_RECONNECT_POLL_INTERVAL);
             let Ok(device) = find_input_device(Some(&input)) else {
                 continue;
             };
+
+            if restart_requested.swap(true, Ordering::Relaxed) {
+                break;
+            }
 
             let device_description = device
                 .description()
@@ -392,7 +462,7 @@ fn request_restart_when_pinned_input_reconnects(input: String) {
                 "pinned input device reconnected: {}; attempting micpipe restart",
                 device_description
             );
-            request_restart_after_disconnect();
+            request_service_restart();
             break;
         }
     });
