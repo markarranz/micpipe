@@ -16,9 +16,10 @@ use ringbuf::{
     traits::{Consumer, Producer, Split},
 };
 
+use anyhow::{Context, Result};
+
 use crate::{
     audio::{convert_frame, find_input_device, find_output_device},
-    error::{Result, ResultExt},
     resampler::Resampler,
     service,
 };

@@ -7,7 +7,7 @@ use objc2_core_audio::{
     kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
 };
 
-use crate::error::{self, Result};
+use anyhow::{Result, bail};
 
 pub struct DefaultInputChangeListener {
     address: AudioObjectPropertyAddress,
@@ -32,9 +32,7 @@ impl DefaultInputChangeListener {
         };
 
         if status != kAudioHardwareNoError {
-            return Err(error::message(format!(
-                "failed to watch default input device changes: Core Audio status {status}"
-            )));
+            bail!("failed to watch default input device changes: Core Audio status {status}");
         }
 
         Ok(Self { address, sender })
