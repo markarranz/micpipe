@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Stop active audio streams while waiting for a pinned input device to reconnect.
+- Split router runtime setup into smaller helpers and name restart behavior by
+  input mode.
 - Clarify the CLI description.
 
 ### Fixed

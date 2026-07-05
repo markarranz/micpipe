@@ -23,6 +23,8 @@ router -> CPAL input stream -> InputPipe -> ring buffer -> OutputPipe -> CPAL ou
 
 `src/main.rs` parses the CLI and dispatches commands. `src/service.rs` owns the
 `launchd` plist lifecycle. `src/router.rs` owns the runtime audio route.
+`AudioRuntime` keeps the stream handles, optional default-input listener, and
+control channel alive for the duration of `run`.
 
 ## Modules
 
@@ -111,8 +113,10 @@ The restart policy depends on how input was configured:
   `kAudioHardwarePropertyDefaultInputDevice`, so a manual system default-input
   change triggers the same restart path without waiting for a disconnect.
 - Pinned input mode: if `--input` was provided, `micpipe` starts a watcher
-  thread that checks every 5 seconds for a matching input device. Once the
-  pinned input reappears, it requests the service restart.
+  thread that checks every 5 seconds for a matching input device. It also sends
+  a control message to the runtime so the active input and output streams are
+  dropped while the process stays alive as a reconnect monitor. Once the pinned
+  input reappears, the watcher requests the service restart.
 
 Restart requests are made on helper threads, not inside the CPAL callback.
 Default input change notifications are deduplicated with disconnect-triggered
@@ -163,12 +167,16 @@ The steady-state runtime has:
 - CPAL's input callback.
 - CPAL's output callback.
 - An optional debug logger thread.
+- A main runtime loop waiting for control messages.
 - A restart thread for immediate default-input recovery, a Core Audio listener
   thread for default-input changes, or a reconnect watcher thread for
   pinned-input recovery.
 
 The audio callbacks do not take mutexes, call `launchctl`, enumerate devices, or
-sleep. Shared debug state is a single relaxed atomic occupancy value.
+sleep. Shared debug state is a single relaxed atomic occupancy value. In pinned
+input mode, the input error callback sends a `StopAudioWork` control message;
+the main runtime loop handles that message by dropping the stream handles and
+stopping the debug logger.
 
 ## Tests
 
@@ -192,6 +200,6 @@ owning real audio devices:
 - Default-input change detection is macOS-specific and uses Core Audio HAL
   property notifications.
 - Output disconnects do not trigger restart or reconnect handling.
-- The main run loop parks forever; shutdown is currently handled by process
-  termination or `launchd`.
+- The main runtime loop is still process-lifetime scoped; shutdown is currently
+  handled by process termination or `launchd`.
 - The resampler favors simplicity over high-fidelity conversion.

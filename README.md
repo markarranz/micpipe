@@ -122,9 +122,9 @@ micpipe uninstall
   disconnects, `micpipe` logs the change and immediately asks the installed
   service to restart.
 - With `--input`, `micpipe` pins that input by case-insensitive substring.
-  If the pinned input disconnects, `micpipe` logs the disconnected device, polls
-  every 5 seconds until that input appears again, then asks the installed
-  service to restart.
+  If the pinned input disconnects, `micpipe` logs the disconnected device, stops
+  the active audio streams, polls every 5 seconds until that input appears
+  again, then asks the installed service to restart.
 
 Output stream errors are logged, but do not currently trigger a restart.
 
@@ -191,10 +191,12 @@ When the system default input changes without a disconnect, `out.log` includes:
 ```
 
 When a pinned input disconnects, `out.log` records that `micpipe` is waiting for
-that device before restarting:
+that device before restarting. The running process remains alive as a reconnect
+monitor, but the active audio streams are stopped:
 
 ```text
 [2026-06-29T13:04:05-07:00] input device disconnected: USB Microphone; waiting for pinned input device 'USB Microphone' to reconnect before restarting
+[2026-06-29T13:04:05-07:00] audio streams stopped while waiting for pinned input reconnect
 [2026-06-29T13:04:10-07:00] pinned input device reconnected: USB Microphone; attempting micpipe restart
 ```
 
