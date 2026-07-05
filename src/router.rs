@@ -7,7 +7,7 @@ use std::{
 };
 
 use cpal::{
-    BufferSize, ErrorKind, StreamConfig,
+    BufferSize, StreamConfig,
     traits::{DeviceTrait, StreamTrait},
 };
 
@@ -86,41 +86,44 @@ pub fn run(args: RunArgs) -> Result<()> {
     };
 
     let restart_requested = Arc::new(AtomicBool::new(false));
+    let audio_work_active = Arc::new(AtomicBool::new(true));
+    let audio_work_active_log = Arc::clone(&audio_work_active);
+    let (audio_control_sender, audio_control_receiver) = std::sync::mpsc::channel();
     let current_input_description = route.input_description.clone();
     let input_error_device_description = route.input_description.clone();
     let input_error_restart_requested = Arc::clone(&restart_requested);
+    let input_error_callback = move |err: cpal::Error| {
+        crate::log_err!("input stream error: {}", err);
+        if err.kind() == cpal::ErrorKind::DeviceNotAvailable
+            && !input_error_restart_requested.swap(true, Ordering::Relaxed)
+        {
+            match AudioDisconnectAction::from_policy(&restart_policy) {
+                AudioDisconnectAction::RestartServiceNow => {
+                    crate::log_out!(
+                        "input device disconnected: {}; attempting micpipe restart",
+                        input_error_device_description
+                    );
+                    request_service_restart();
+                }
+                AudioDisconnectAction::WaitForPinnedInputReconnectAndStopAudio { input } => {
+                    crate::log_out!(
+                        "input device disconnected: {}; waiting for pinned input device '{}' to reconnect before restarting",
+                        input_error_device_description,
+                        input
+                    );
+                    request_restart_when_pinned_input_reconnects(input);
+                    let _ = audio_control_sender.send(AudioControl::StopAudioWork);
+                }
+            }
+        }
+    };
+
     let input_stream = route
         .input_device
         .build_input_stream(
             route.input_config,
             input_callback,
-            move |err| {
-                crate::log_err!("input stream error: {}", err);
-                if err.kind() == ErrorKind::DeviceNotAvailable
-                    && !input_error_restart_requested.swap(true, Ordering::Relaxed)
-                {
-                    match &restart_policy {
-                        RestartPolicy::RestartOnDisconnect => {
-                            crate::log_out!(
-                                "input device disconnected: {}; attempting micpipe restart",
-                                input_error_device_description
-                            );
-                            request_service_restart();
-                        }
-                        RestartPolicy::RestartOnPinnedInputReconnect { input } => {
-                            crate::log_out!(
-                                "input device disconnected: {}; waiting for pinned input device '{}' to reconnect before restarting",
-                                input_error_device_description,
-                                input
-                            );
-                            request_restart_when_pinned_input_reconnects(
-                                input.clone(),
-                                Arc::clone(&input_error_restart_requested),
-                            );
-                        }
-                    }
-                }
-            },
+            input_error_callback,
             None,
         )
         .context("failed to build input stream")?;
@@ -159,6 +162,9 @@ pub fn run(args: RunArgs) -> Result<()> {
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(1));
+                if !audio_work_active_log.load(Ordering::Relaxed) {
+                    break;
+                }
                 let occ = occupancy_log.load(Ordering::Relaxed);
                 let pct = (occ as f32 / buffer_plan.capacity as f32) * 100.0;
                 crate::log_out!(
@@ -171,9 +177,22 @@ pub fn run(args: RunArgs) -> Result<()> {
         });
     }
 
-    // Park main forever so the streams stay alive.
+    let mut input_stream = Some(input_stream);
+    let mut output_stream = Some(output_stream);
+
+    // Keep main alive so streams and reconnect monitors stay alive.
     loop {
-        std::thread::park();
+        match audio_control_receiver.recv() {
+            Ok(AudioControl::StopAudioWork) => {
+                let stopped_input = input_stream.take().is_some();
+                let stopped_output = output_stream.take().is_some();
+                if stopped_input || stopped_output {
+                    audio_work_active.store(false, Ordering::Relaxed);
+                    crate::log_out!("audio streams stopped while waiting for pinned input reconnect");
+                }
+            }
+            Err(_) => std::thread::park(),
+        }
     }
 }
 
@@ -192,6 +211,29 @@ impl RestartPolicy {
             None => Self::RestartOnDisconnect,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AudioDisconnectAction {
+    RestartServiceNow,
+    WaitForPinnedInputReconnectAndStopAudio { input: String },
+}
+
+impl AudioDisconnectAction {
+    fn from_policy(policy: &RestartPolicy) -> Self {
+        match policy {
+            RestartPolicy::RestartOnDisconnect => Self::RestartServiceNow,
+            RestartPolicy::RestartOnPinnedInputReconnect { input } => {
+                Self::WaitForPinnedInputReconnectAndStopAudio {
+                    input: input.clone(),
+                }
+            }
+        }
+    }
+}
+
+enum AudioControl {
+    StopAudioWork,
 }
 
 struct AudioRoute {
@@ -442,17 +484,13 @@ fn default_input_description() -> Result<String> {
         .to_string())
 }
 
-fn request_restart_when_pinned_input_reconnects(input: String, restart_requested: Arc<AtomicBool>) {
+fn request_restart_when_pinned_input_reconnects(input: String) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(PINNED_INPUT_RECONNECT_POLL_INTERVAL);
             let Ok(device) = find_input_device(Some(&input)) else {
                 continue;
             };
-
-            if restart_requested.swap(true, Ordering::Relaxed) {
-                break;
-            }
 
             let device_description = device
                 .description()
@@ -481,7 +519,8 @@ mod tests {
     };
 
     use super::{
-        BufferPlan, InputPipe, OUTPUT_BUFFER_FRAMES, OutputPipe, RestartPolicy,
+        AudioDisconnectAction, BufferPlan, InputPipe, OUTPUT_BUFFER_FRAMES, OutputPipe,
+        RestartPolicy,
         STEADY_CUSHION_CALLBACKS,
     };
     use crate::cli::RunArgs;
@@ -577,6 +616,21 @@ mod tests {
         assert_eq!(
             RestartPolicy::from_args(&args),
             RestartPolicy::RestartOnPinnedInputReconnect {
+                input: "MacBook Pro Microphone".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn pinned_input_disconnect_waits_for_reconnect_and_stops_audio_work() {
+        let action =
+            AudioDisconnectAction::from_policy(&RestartPolicy::RestartOnPinnedInputReconnect {
+                input: "MacBook Pro Microphone".to_string(),
+            });
+
+        assert_eq!(
+            action,
+            AudioDisconnectAction::WaitForPinnedInputReconnectAndStopAudio {
                 input: "MacBook Pro Microphone".to_string()
             }
         );
