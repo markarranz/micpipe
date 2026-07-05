@@ -16,7 +16,12 @@ pub struct DefaultInputChangeListener {
 
 impl DefaultInputChangeListener {
     pub fn new(sender: Sender<()>) -> Result<Self> {
-        let mut address = default_input_property_address();
+        let address = AudioObjectPropertyAddress {
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain,
+        };
+
         let sender = Box::new(sender);
 
         // SAFETY: `address` points to initialized memory for the duration of the call.
@@ -25,9 +30,9 @@ impl DefaultInputChangeListener {
         let status = unsafe {
             AudioObjectAddPropertyListener(
                 kAudioObjectSystemObject as AudioObjectID,
-                NonNull::from(&mut address),
+                NonNull::from(&address),
                 Some(default_input_changed),
-                client_data(&sender),
+                sender.as_ref() as *const Sender<()> as *mut c_void,
             )
         };
 
@@ -48,23 +53,11 @@ impl Drop for DefaultInputChangeListener {
         let _ = unsafe {
             AudioObjectRemovePropertyListener(
                 kAudioObjectSystemObject as AudioObjectID,
-                NonNull::from(&mut self.address),
+                NonNull::from(&self.address),
                 Some(default_input_changed),
-                client_data(&self.sender),
+                self.sender.as_ref() as *const Sender<()> as *mut c_void,
             )
         };
-    }
-}
-
-fn client_data(sender: &Sender<()>) -> *mut c_void {
-    std::ptr::from_ref(sender).cast_mut().cast::<c_void>()
-}
-
-fn default_input_property_address() -> AudioObjectPropertyAddress {
-    AudioObjectPropertyAddress {
-        mSelector: kAudioHardwarePropertyDefaultInputDevice,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain,
     }
 }
 
