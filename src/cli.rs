@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "micpipe",
     version,
-    about = "Route your microphone into BlackHole"
+    about = "Route your microphone into another audio device, like BlackHole."
 )]
 pub struct Cli {
     #[command(subcommand)]
