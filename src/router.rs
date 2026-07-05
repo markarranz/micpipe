@@ -7,7 +7,7 @@ use std::{
 };
 
 use cpal::{
-    BufferSize, StreamConfig,
+    BufferSize, ErrorKind, StreamConfig,
     traits::{DeviceTrait, StreamTrait},
 };
 
@@ -35,10 +35,95 @@ const RESAMPLED_SCRATCH_CAPACITY: usize = 8192;
 const PINNED_INPUT_RECONNECT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn run(args: RunArgs) -> Result<()> {
-    let restart_policy = RestartPolicy::from_args(&args);
-    let tracks_default_input = matches!(restart_policy, RestartPolicy::RestartOnDisconnect);
-    let route = AudioRoute::from_args(&args)?;
+    let runtime = AudioRuntime::start(&args)?;
+    runtime.park();
+}
 
+struct AudioRuntime {
+    input_stream: Option<cpal::Stream>,
+    output_stream: Option<cpal::Stream>,
+    audio_work_active: Arc<AtomicBool>,
+    audio_control_receiver: std::sync::mpsc::Receiver<AudioControl>,
+    #[cfg(target_os = "macos")]
+    _default_input_change_listener: Option<DefaultInputChangeListener>,
+}
+
+impl AudioRuntime {
+    fn start(args: &RunArgs) -> Result<Self> {
+        let restart_policy = RestartPolicy::from_args(args);
+        let route = AudioRoute::from_args(args)?;
+        log_route(&route);
+
+        let buffer_plan = BufferPlan::new(route.in_rate, route.out_rate, route.out_channels);
+        let (producer, consumer) = HeapRb::<f32>::new(buffer_plan.capacity).split();
+        log_buffer_plan(buffer_plan);
+
+        // Clock-drift instrumentation: shared buffer-occupancy gauge.
+        let occupancy = Arc::new(AtomicUsize::new(0));
+        let restart_requested = Arc::new(AtomicBool::new(false));
+        let audio_work_active = Arc::new(AtomicBool::new(true));
+        let (audio_control_sender, audio_control_receiver) = std::sync::mpsc::channel();
+
+        let input_stream = build_input_stream(
+            &route,
+            producer,
+            restart_policy.clone(),
+            Arc::clone(&restart_requested),
+            audio_control_sender,
+        )?;
+        let output_stream =
+            build_output_stream(&route, consumer, buffer_plan, Arc::clone(&occupancy))?;
+
+        input_stream
+            .play()
+            .context("failed to start input stream")?;
+        output_stream
+            .play()
+            .context("failed to start output stream")?;
+
+        crate::log_out!("Mic -> BlackHole running...");
+
+        #[cfg(target_os = "macos")]
+        let default_input_change_listener =
+            watch_default_input_changes_when_needed(&route, &restart_policy, restart_requested)?;
+
+        spawn_buffer_logger(
+            args.debug,
+            occupancy,
+            buffer_plan,
+            Arc::clone(&audio_work_active),
+        );
+
+        Ok(Self {
+            input_stream: Some(input_stream),
+            output_stream: Some(output_stream),
+            audio_work_active,
+            audio_control_receiver,
+            #[cfg(target_os = "macos")]
+            _default_input_change_listener: default_input_change_listener,
+        })
+    }
+
+    fn park(mut self) -> ! {
+        loop {
+            match self.audio_control_receiver.recv() {
+                Ok(AudioControl::StopAudioWork) => {
+                    let stopped_input = self.input_stream.take().is_some();
+                    let stopped_output = self.output_stream.take().is_some();
+                    if stopped_input || stopped_output {
+                        self.audio_work_active.store(false, Ordering::Relaxed);
+                        crate::log_out!(
+                            "audio streams stopped while waiting for pinned input reconnect"
+                        );
+                    }
+                }
+                Err(_) => std::thread::park(),
+            }
+        }
+    }
+}
+
+fn log_route(route: &AudioRoute) {
     crate::log_out!(
         "Routing: {} ({}ch@{}Hz) -> {} ({}ch@{}Hz)",
         route.input_description,
@@ -48,10 +133,9 @@ pub fn run(args: RunArgs) -> Result<()> {
         route.out_channels,
         route.out_rate,
     );
+}
 
-    let buffer_plan = BufferPlan::new(route.in_rate, route.out_rate, route.out_channels);
-    let (producer, consumer) = HeapRb::<f32>::new(buffer_plan.capacity).split();
-
+fn log_buffer_plan(buffer_plan: BufferPlan) {
     crate::log_out!(
         "Input {} | callback {} frames | cushion {} samples (~{}ms) | buffer {} samples",
         if buffer_plan.likely_jittery {
@@ -64,11 +148,18 @@ pub fn run(args: RunArgs) -> Result<()> {
         buffer_plan.target_fill / buffer_plan.samples_per_ms,
         buffer_plan.capacity
     );
+}
 
-    // Clock-drift instrumentation: shared buffer-occupancy gauge.
-    let occupancy = Arc::new(AtomicUsize::new(0));
-    let occupancy_log = Arc::clone(&occupancy); // moves into the logger thread
-
+fn build_input_stream<P>(
+    route: &AudioRoute,
+    producer: P,
+    restart_policy: RestartPolicy,
+    restart_requested: Arc<AtomicBool>,
+    audio_control_sender: std::sync::mpsc::Sender<AudioControl>,
+) -> Result<cpal::Stream>
+where
+    P: Producer<Item = f32> + Send + 'static,
+{
     let mut input_pipe = InputPipe::new(
         producer,
         route.in_channels,
@@ -76,39 +167,46 @@ pub fn run(args: RunArgs) -> Result<()> {
         route.out_rate,
         route.out_channels,
     );
-    let input_callback = move |input: &[f32], _: &cpal::InputCallbackInfo| {
-        input_pipe.capture(input);
-    };
 
-    let mut output_pipe = OutputPipe::new(consumer, buffer_plan.target_fill, occupancy);
-    let output_callback = move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-        output_pipe.fill(output);
-    };
+    route
+        .input_device
+        .build_input_stream(
+            route.input_config.clone(),
+            move |input: &[f32], _: &cpal::InputCallbackInfo| input_pipe.capture(input),
+            input_error_callback(
+                restart_policy,
+                route.input_description.clone(),
+                restart_requested,
+                audio_control_sender,
+            ),
+            None,
+        )
+        .context("failed to build input stream")
+}
 
-    let restart_requested = Arc::new(AtomicBool::new(false));
-    let audio_work_active = Arc::new(AtomicBool::new(true));
-    let audio_work_active_log = Arc::clone(&audio_work_active);
-    let (audio_control_sender, audio_control_receiver) = std::sync::mpsc::channel();
-    let current_input_description = route.input_description.clone();
-    let input_error_device_description = route.input_description.clone();
-    let input_error_restart_requested = Arc::clone(&restart_requested);
-    let input_error_callback = move |err: cpal::Error| {
+fn input_error_callback(
+    restart_policy: RestartPolicy,
+    input_device_description: String,
+    restart_requested: Arc<AtomicBool>,
+    audio_control_sender: std::sync::mpsc::Sender<AudioControl>,
+) -> impl FnMut(cpal::Error) + Send + 'static {
+    move |err| {
         crate::log_err!("input stream error: {}", err);
-        if err.kind() == cpal::ErrorKind::DeviceNotAvailable
-            && !input_error_restart_requested.swap(true, Ordering::Relaxed)
+        if err.kind() == ErrorKind::DeviceNotAvailable
+            && !restart_requested.swap(true, Ordering::Relaxed)
         {
             match AudioDisconnectAction::from_policy(&restart_policy) {
                 AudioDisconnectAction::RestartServiceNow => {
                     crate::log_out!(
                         "input device disconnected: {}; attempting micpipe restart",
-                        input_error_device_description
+                        input_device_description
                     );
                     request_service_restart();
                 }
                 AudioDisconnectAction::WaitForPinnedInputReconnectAndStopAudio { input } => {
                     crate::log_out!(
                         "input device disconnected: {}; waiting for pinned input device '{}' to reconnect before restarting",
-                        input_error_device_description,
+                        input_device_description,
                         input
                     );
                     request_restart_when_pinned_input_reconnects(input);
@@ -116,99 +214,88 @@ pub fn run(args: RunArgs) -> Result<()> {
                 }
             }
         }
-    };
+    }
+}
 
-    let input_stream = route
-        .input_device
-        .build_input_stream(
-            route.input_config,
-            input_callback,
-            input_error_callback,
-            None,
-        )
-        .context("failed to build input stream")?;
+fn build_output_stream<C>(
+    route: &AudioRoute,
+    consumer: C,
+    buffer_plan: BufferPlan,
+    occupancy: Arc<AtomicUsize>,
+) -> Result<cpal::Stream>
+where
+    C: Consumer<Item = f32> + Send + 'static,
+{
+    let mut output_pipe = OutputPipe::new(consumer, buffer_plan.target_fill, occupancy);
 
-    let output_stream = route
+    route
         .output_device
         .build_output_stream(
-            route.output_config,
-            output_callback,
+            route.output_config.clone(),
+            move |output: &mut [f32], _: &cpal::OutputCallbackInfo| output_pipe.fill(output),
             |err| crate::log_err!("output stream error: {}", err),
             None,
         )
-        .context("failed to build output stream")?;
+        .context("failed to build output stream")
+}
 
-    input_stream
-        .play()
-        .context("failed to start input stream")?;
-    output_stream
-        .play()
-        .context("failed to start output stream")?;
-
-    crate::log_out!("Mic -> BlackHole running...");
-
-    #[cfg(target_os = "macos")]
-    let _default_input_change_listener = if tracks_default_input {
-        Some(watch_default_input_changes(
-            current_input_description,
-            Arc::clone(&restart_requested),
-        )?)
-    } else {
-        None
-    };
-
-    // Logger thread prints occupancy once per second off the audio thread.
-    if args.debug {
-        std::thread::spawn(move || {
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                if !audio_work_active_log.load(Ordering::Relaxed) {
-                    break;
-                }
-                let occ = occupancy_log.load(Ordering::Relaxed);
-                let pct = (occ as f32 / buffer_plan.capacity as f32) * 100.0;
-                crate::log_out!(
-                    "buffer: {} / {} samples ({:.1}%)",
-                    occ,
-                    buffer_plan.capacity,
-                    pct
-                );
-            }
-        });
+#[cfg(target_os = "macos")]
+fn watch_default_input_changes_when_needed(
+    route: &AudioRoute,
+    restart_policy: &RestartPolicy,
+    restart_requested: Arc<AtomicBool>,
+) -> Result<Option<DefaultInputChangeListener>> {
+    if matches!(restart_policy, RestartPolicy::FollowDefaultInput) {
+        return Ok(Some(watch_default_input_changes(
+            route.input_description.clone(),
+            restart_requested,
+        )?));
     }
 
-    let mut input_stream = Some(input_stream);
-    let mut output_stream = Some(output_stream);
+    Ok(None)
+}
 
-    // Keep main alive so streams and reconnect monitors stay alive.
-    loop {
-        match audio_control_receiver.recv() {
-            Ok(AudioControl::StopAudioWork) => {
-                let stopped_input = input_stream.take().is_some();
-                let stopped_output = output_stream.take().is_some();
-                if stopped_input || stopped_output {
-                    audio_work_active.store(false, Ordering::Relaxed);
-                    crate::log_out!("audio streams stopped while waiting for pinned input reconnect");
-                }
+fn spawn_buffer_logger(
+    debug: bool,
+    occupancy: Arc<AtomicUsize>,
+    buffer_plan: BufferPlan,
+    audio_work_active: Arc<AtomicBool>,
+) {
+    if !debug {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if !audio_work_active.load(Ordering::Relaxed) {
+                break;
             }
-            Err(_) => std::thread::park(),
+            let occ = occupancy.load(Ordering::Relaxed);
+            let pct = (occ as f32 / buffer_plan.capacity as f32) * 100.0;
+            crate::log_out!(
+                "buffer: {} / {} samples ({:.1}%)",
+                occ,
+                buffer_plan.capacity,
+                pct
+            );
         }
-    }
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RestartPolicy {
-    RestartOnDisconnect,
-    RestartOnPinnedInputReconnect { input: String },
+    FollowDefaultInput,
+    PinnedInput { name: String },
 }
 
 impl RestartPolicy {
     fn from_args(args: &RunArgs) -> Self {
         match &args.input {
-            Some(input) => Self::RestartOnPinnedInputReconnect {
-                input: input.clone(),
+            Some(input) => Self::PinnedInput {
+                name: input.clone(),
             },
-            None => Self::RestartOnDisconnect,
+            None => Self::FollowDefaultInput,
         }
     }
 }
@@ -222,12 +309,10 @@ enum AudioDisconnectAction {
 impl AudioDisconnectAction {
     fn from_policy(policy: &RestartPolicy) -> Self {
         match policy {
-            RestartPolicy::RestartOnDisconnect => Self::RestartServiceNow,
-            RestartPolicy::RestartOnPinnedInputReconnect { input } => {
-                Self::WaitForPinnedInputReconnectAndStopAudio {
-                    input: input.clone(),
-                }
-            }
+            RestartPolicy::FollowDefaultInput => Self::RestartServiceNow,
+            RestartPolicy::PinnedInput { name } => Self::WaitForPinnedInputReconnectAndStopAudio {
+                input: name.clone(),
+            },
         }
     }
 }
@@ -520,8 +605,7 @@ mod tests {
 
     use super::{
         AudioDisconnectAction, BufferPlan, InputPipe, OUTPUT_BUFFER_FRAMES, OutputPipe,
-        RestartPolicy,
-        STEADY_CUSHION_CALLBACKS,
+        RestartPolicy, STEADY_CUSHION_CALLBACKS,
     };
     use crate::cli::RunArgs;
 
@@ -592,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_policy_restarts_when_tracking_default_input() {
+    fn restart_policy_follows_default_input() {
         let args = RunArgs {
             output: "BlackHole 2ch".to_string(),
             input: None,
@@ -601,12 +685,12 @@ mod tests {
 
         assert_eq!(
             RestartPolicy::from_args(&args),
-            RestartPolicy::RestartOnDisconnect
+            RestartPolicy::FollowDefaultInput
         );
     }
 
     #[test]
-    fn restart_policy_restarts_when_pinned_input_reconnects() {
+    fn restart_policy_pins_input_by_name() {
         let args = RunArgs {
             output: "BlackHole 2ch".to_string(),
             input: Some("MacBook Pro Microphone".to_string()),
@@ -615,18 +699,17 @@ mod tests {
 
         assert_eq!(
             RestartPolicy::from_args(&args),
-            RestartPolicy::RestartOnPinnedInputReconnect {
-                input: "MacBook Pro Microphone".to_string()
+            RestartPolicy::PinnedInput {
+                name: "MacBook Pro Microphone".to_string()
             }
         );
     }
 
     #[test]
     fn pinned_input_disconnect_waits_for_reconnect_and_stops_audio_work() {
-        let action =
-            AudioDisconnectAction::from_policy(&RestartPolicy::RestartOnPinnedInputReconnect {
-                input: "MacBook Pro Microphone".to_string(),
-            });
+        let action = AudioDisconnectAction::from_policy(&RestartPolicy::PinnedInput {
+            name: "MacBook Pro Microphone".to_string(),
+        });
 
         assert_eq!(
             action,
