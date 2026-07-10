@@ -398,6 +398,10 @@ fn watch_default_input_changes_when_needed(
     Ok(None)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "The percentage is diagnostic output, not control data"
+)]
 fn spawn_buffer_logger(
     debug: bool,
     occupancy: Arc<AtomicUsize>,
@@ -879,6 +883,10 @@ mod tests {
         assert_eq!(consumer.try_pop(), None);
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "These output fixtures use exactly representable sample values"
+    )]
     #[test]
     fn output_pipe_waits_for_cushion_before_draining() {
         let (mut producer, consumer) = HeapRb::<f32>::new(4).split();
@@ -894,6 +902,10 @@ mod tests {
         assert_eq!(occupancy.load(Ordering::Relaxed), 2);
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "These output fixtures use exactly representable sample values"
+    )]
     #[test]
     fn output_pipe_drains_after_cushion_is_ready() {
         let (mut producer, consumer) = HeapRb::<f32>::new(4).split();

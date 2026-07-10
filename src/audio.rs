@@ -41,8 +41,7 @@ pub fn find_output_device(name: Option<&str>) -> Result<cpal::Device> {
                 .context("could not enumerate output devices")?
                 .find(|d| {
                     d.description()
-                        .map(|desc| device_description_matches(&desc.to_string(), &needle))
-                        .unwrap_or(false)
+                        .is_ok_and(|desc| device_description_matches(&desc.to_string(), &needle))
                 })
                 .context(format!("no output device matching '{needle}'"))?)
         }
@@ -64,8 +63,7 @@ pub fn find_input_device(name: Option<&str>) -> Result<cpal::Device> {
                 .context("could not enumerate input devices")?
                 .find(|d| {
                     d.description()
-                        .map(|desc| device_description_matches(&desc.to_string(), &needle))
-                        .unwrap_or(false)
+                        .is_ok_and(|desc| device_description_matches(&desc.to_string(), &needle))
                 })
                 .context(format!("no input device matching '{needle}'"))?)
         }
@@ -80,6 +78,10 @@ fn device_description_matches(description: &str, lowercase_needle: &str) -> bool
 mod tests {
     use super::{convert_frame, device_description_matches};
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "These channel-mapping fixtures use exactly representable values"
+    )]
     #[test]
     fn duplicates_mono_to_stereo() {
         let mut output = [0.0, 0.0];
@@ -89,6 +91,10 @@ mod tests {
         assert_eq!(output, [0.75, 0.75]);
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "These channel-mapping fixtures use exactly representable values"
+    )]
     #[test]
     fn averages_stereo_to_mono() {
         let mut output = [0.0];
@@ -98,6 +104,10 @@ mod tests {
         assert_eq!(output, [0.5]);
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "These channel-mapping fixtures use exactly representable values"
+    )]
     #[test]
     fn copies_matching_channels() {
         let mut output = [0.0, 0.0];
@@ -107,6 +117,10 @@ mod tests {
         assert_eq!(output, [0.25, 0.75]);
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "These channel-mapping fixtures use exactly representable values"
+    )]
     #[test]
     fn pads_missing_fallback_channels() {
         let mut output = [1.0, 1.0, 1.0];

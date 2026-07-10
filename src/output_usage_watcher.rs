@@ -2,7 +2,7 @@
 
 use std::{
     ffi::c_void,
-    mem::{MaybeUninit, size_of},
+    mem::MaybeUninit,
     ptr::{NonNull, null, null_mut},
     sync::{
         Arc,
@@ -151,18 +151,19 @@ fn output_is_used_as_input(output_device_id: AudioDeviceID) -> Result<bool> {
         kAudioObjectPropertyElementMain,
         "CoreAudio process object list",
     )?;
-    let own_pid = std::process::id() as libc::pid_t;
+    let own_pid: libc::pid_t = std::process::id()
+        .try_into()
+        .context("current process ID does not fit CoreAudio's pid_t")?;
 
     for process_id in process_ids {
-        let process_pid = match property_data::<libc::pid_t>(
+        let Ok(process_pid) = property_data::<libc::pid_t>(
             process_id,
             kAudioProcessPropertyPID,
             kAudioObjectPropertyScopeGlobal,
             kAudioObjectPropertyElementMain,
             "CoreAudio process PID",
-        ) {
-            Ok(pid) => pid,
-            Err(_) => continue,
+        ) else {
+            continue;
         };
 
         if process_pid == own_pid {
@@ -184,15 +185,14 @@ fn output_is_used_as_input(output_device_id: AudioDeviceID) -> Result<bool> {
             continue;
         }
 
-        let input_devices = match property_data_vec::<AudioDeviceID>(
+        let Ok(input_devices) = property_data_vec::<AudioDeviceID>(
             process_id,
             kAudioProcessPropertyDevices,
             kAudioObjectPropertyScopeInput,
             kAudioObjectPropertyElementMain,
             "CoreAudio process input devices",
-        ) {
-            Ok(devices) => devices,
-            Err(_) => continue,
+        ) else {
+            continue;
         };
 
         if process_uses_input_device(&input_devices, output_device_id) {
@@ -214,7 +214,8 @@ fn device_uid(device_id: AudioDeviceID) -> Result<String> {
         mElement: kAudioObjectPropertyElementMain,
     };
     let mut uid: *mut CFString = null_mut();
-    let mut data_size = size_of::<*mut CFString>() as u32;
+    let mut data_size = u32::try_from(std::mem::size_of::<*mut CFString>())
+        .context("CoreAudio pointer size does not fit in u32")?;
 
     // SAFETY: All pointers refer to initialized storage that remains valid for the duration of
     // the synchronous CoreAudio call. CoreAudio writes one retained CFString pointer to `uid`.
@@ -249,7 +250,8 @@ fn property_data<T: Copy>(
         mElement: element,
     };
     let mut value = MaybeUninit::<T>::uninit();
-    let mut data_size = size_of::<T>() as u32;
+    let mut data_size = u32::try_from(std::mem::size_of::<T>())
+        .context("CoreAudio property size does not fit in u32")?;
 
     // SAFETY: The address and output buffer are valid for the duration of the synchronous call.
     let status = unsafe {
@@ -263,10 +265,10 @@ fn property_data<T: Copy>(
         )
     };
     check_status(status, description)?;
-    if (data_size as usize) < size_of::<T>() {
+    if (data_size as usize) < std::mem::size_of::<T>() {
         return Err(anyhow!(
             "{description}: CoreAudio returned {data_size} bytes, expected {}",
-            size_of::<T>()
+            std::mem::size_of::<T>()
         ));
     }
 
@@ -305,14 +307,14 @@ fn property_data_vec<T: Copy>(
     if byte_count == 0 {
         return Ok(Vec::new());
     }
-    if !byte_count.is_multiple_of(size_of::<T>()) {
+    if !byte_count.is_multiple_of(std::mem::size_of::<T>()) {
         return Err(anyhow!(
             "{description}: CoreAudio returned {data_size} bytes, which is not a multiple of {}",
-            size_of::<T>()
+            std::mem::size_of::<T>()
         ));
     }
 
-    let capacity = byte_count / size_of::<T>();
+    let capacity = byte_count / std::mem::size_of::<T>();
     let mut values = Vec::<T>::with_capacity(capacity);
     let mut actual_size = data_size;
 
@@ -331,7 +333,8 @@ fn property_data_vec<T: Copy>(
     check_status(status, description)?;
 
     let actual_byte_count = actual_size as usize;
-    if actual_byte_count > byte_count || !actual_byte_count.is_multiple_of(size_of::<T>()) {
+    if actual_byte_count > byte_count || !actual_byte_count.is_multiple_of(std::mem::size_of::<T>())
+    {
         return Err(anyhow!(
             "{description}: CoreAudio returned an invalid data size of {actual_size}"
         ));
@@ -339,8 +342,8 @@ fn property_data_vec<T: Copy>(
 
     // SAFETY: The successful query initialized exactly this many T values in `values`.
     unsafe {
-        values.set_len(actual_byte_count / size_of::<T>());
-    }
+        values.set_len(actual_byte_count / std::mem::size_of::<T>());
+    };
     Ok(values)
 }
 

@@ -36,7 +36,7 @@ impl DefaultInputChangeListener {
                 kAudioObjectSystemObject as AudioObjectID,
                 NonNull::from(&address),
                 Some(default_input_changed),
-                sender.as_ref() as *const Sender<()> as *mut c_void,
+                sender_pointer(sender.as_ref()),
             )
         };
 
@@ -57,10 +57,14 @@ impl Drop for DefaultInputChangeListener {
                 kAudioObjectSystemObject as AudioObjectID,
                 NonNull::from(&self.address),
                 Some(default_input_changed),
-                self.sender.as_ref() as *const Sender<()> as *mut c_void,
+                sender_pointer(self.sender.as_ref()),
             )
         };
     }
+}
+
+fn sender_pointer(sender: &Sender<()>) -> *mut c_void {
+    std::ptr::from_ref(sender).cast_mut().cast()
 }
 
 unsafe extern "C-unwind" fn default_input_changed(
