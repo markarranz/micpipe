@@ -30,9 +30,9 @@ pub fn install(args: &RunArgs) -> Result<()> {
 
     let args_xml: String = program_args
         .iter()
-        .map(|a| format!("        <string>{}</string>", xml_escape(a)))
+        .map(|a| format!("<string>{}</string>", xml_escape(a)))
         .collect::<Vec<String>>()
-        .join("\n");
+        .join("\n      ");
 
     let out_log = log_dir.join("out.log");
     let err_log = log_dir.join("err.log");
