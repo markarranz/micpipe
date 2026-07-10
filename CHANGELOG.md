@@ -7,24 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-10
+
 ### Added
 
+- Start audio streams only while another app actively uses the selected output
+  as an input.
 - Restart the service when the macOS default input device changes.
-- Add CI coverage for formatting, linting, tests, and builds.
 
 ### Changed
 
+- Adapt output buffering to the selected device's supported buffer range.
 - Stop active audio streams while waiting for a pinned input device to reconnect.
-- Split router runtime setup into smaller helpers and name restart behavior by
-  input mode.
-- Clarify the CLI description.
+- Clarify `micpipe`'s virtual-microphone use case and add a runnable BlackHole
+  routing example.
 
 ### Fixed
 
-- Keep the default input change listener's callback state alive for the full
-  listener lifetime.
-- Use immutable references when registering and unregistering the Core Audio
-  property listener address.
+- Correct generated launchd plist argument indentation.
 
 ## [0.1.0] - 2026-07-02
 
@@ -38,5 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Log buffer occupancy with `--debug`.
 - Install, start, stop, restart, uninstall, and inspect the launchd service.
 
-[unreleased]: https://github.com/markarranz/micpipe/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/markarranz/micpipe/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/markarranz/micpipe/releases/tag/v0.2.0
 [0.1.0]: https://github.com/markarranz/micpipe/releases/tag/v0.1.0

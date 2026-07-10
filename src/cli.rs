@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "micpipe",
     version,
-    about = "Route your microphone into another audio device, like BlackHole."
+    about = "Route microphone audio into BlackHole or another CoreAudio output for use as a virtual microphone."
 )]
 /// Parsed `micpipe` command-line arguments.
 pub struct Cli {
@@ -25,7 +25,7 @@ pub enum Command {
     Uninstall,
     /// Start the installed service.
     Start,
-    /// stop the running service.
+    /// Stop the running service.
     Stop,
     /// Restart the service.
     Restart,

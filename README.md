@@ -1,11 +1,12 @@
 # micpipe
 
-`micpipe` is a lightweight macOS audio router service for sending your
-microphone into `BlackHole 2ch` or another CoreAudio output. It is built for the
-common workflow of using BlackHole as the microphone source in another app while
-keeping the route alive in the background.
+`micpipe` is a lightweight macOS audio router for sending your microphone into
+`BlackHole 2ch` or another CoreAudio output. This lets a call, meeting, or
+recording app use BlackHole as its microphone input while receiving both your
+voice and other audio routed to the virtual device.
 
-It can also run in the foreground while you are testing.
+Run it in the foreground for testing, or install it as a per-user `launchd`
+service.
 
 ## What it does
 
@@ -21,14 +22,15 @@ It can also run in the foreground while you are testing.
 
 ## What it is not
 
-`micpipe` is not a full multi-source mixer. It does not currently combine
-multiple inputs, expose gain controls, or provide mute/solo controls. It is a
-small background audio router for keeping a microphone-to-output route alive.
+`micpipe` is not a full multi-source mixer. It does not itself combine multiple
+inputs, expose gain controls, or provide mute/solo controls. Instead, it routes
+one microphone input to one output; other apps can send additional audio to
+BlackHole separately.
 
 ## Requirements
 
 - macOS
-- Rust and Cargo
+- Rust 1.88 or newer, with Cargo
 - BlackHole, or another CoreAudio output device to receive the microphone audio
 - Microphone permission for the terminal or installed binary that runs `micpipe`
 
@@ -59,7 +61,8 @@ to the first output device whose description contains `BlackHole 2ch`.
 
 On macOS, `micpipe` waits for an app to actively select that output as an input
 before it starts the audio streams. For example, select `BlackHole 2ch` as the
-microphone in a calling app, then join or start the call.
+microphone in a calling app, then join or start the call. Configure the other
+audio you want to share to use `BlackHole 2ch` as its output as well.
 
 Install and start the background service:
 
@@ -89,14 +92,53 @@ Add `--debug` to log buffer occupancy once per second:
 micpipe run --debug
 ```
 
-## Common use cases
+## Runnable example: share audio and hear it locally
 
-- Send your mic into BlackHole so another app can select BlackHole as its input.
-- Keep that route alive as a background service.
-- Follow whichever microphone is currently the macOS default, including manual
-  default-input changes.
-- Pin a USB or external microphone and restart only after that same device
-  reconnects.
+This test uses built-in macOS tools to record your microphone and a generated
+voice through BlackHole while playing the same generated voice through your
+current system output. It does not require a Multi-Output Device or pinning an
+input in `micpipe`.
+
+1. Open **QuickTime Player**, choose **File > New Audio Recording**, and select
+   `BlackHole 2ch` as the recording's microphone. Keep the monitoring volume at
+   zero during the test to prevent feedback.
+2. In one Terminal window, start `micpipe` and leave it running:
+
+   ```bash
+   micpipe run
+   ```
+
+   With no `--input`, `micpipe` follows your current default microphone.
+3. Start recording in QuickTime, then wait until the first Terminal reports
+   `Mic -> BlackHole 2ch running while output is being used as input`.
+4. Speak into your microphone and run this in a second Terminal window:
+
+   ```bash
+   say -a "BlackHole 2ch" "This audio is playing through BlackHole." &
+   say "This audio is playing through BlackHole."
+   wait
+   ```
+
+The first `say` process sends the phrase to BlackHole while the second sends it
+to your current system output, so you should hear it immediately. Stop and play
+the QuickTime recording; it should contain both your microphone from `micpipe`
+and the generated voice sent to BlackHole. Press Control-C in the first Terminal
+window when you are finished.
+
+For a call, select `BlackHole 2ch` as the call app's microphone and send the
+audio you want to share to BlackHole. Keep the call app's speaker output on your
+headphones or speakers so its incoming audio is not fed back into BlackHole.
+
+## Why it exists
+
+`micpipe` was built for Tuple's
+[Dad Joke Greeter](https://tuple.app/triggers/directory/dad-joke-greeter), which
+speaks a joke when someone joins a room. The greeter sends generated audio to
+BlackHole while `micpipe` sends the user's microphone to the same virtual
+device. Tuple selects BlackHole as its microphone and receives both.
+
+The same routing can be used with another call, meeting, or recording app that
+accepts BlackHole as a microphone input.
 
 ## macOS setup notes
 
