@@ -44,7 +44,7 @@ fn timestamp_from_unix_local(unix_seconds: u64) -> Option<String> {
     // SAFETY: `local_time` points to valid, writable memory and `raw_time` lives long
     // enough for the call. `localtime_r` initializes `local_time` when it succeeds.
     let local_time = unsafe {
-        if libc::localtime_r(&raw_time, local_time.as_mut_ptr()).is_null() {
+        if libc::localtime_r(&raw const raw_time, local_time.as_mut_ptr()).is_null() {
             return None;
         }
         local_time.assume_init()
@@ -136,7 +136,7 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
     let month_prime = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
+    let year = year + i64::from(month <= 2);
 
     (year, month, day)
 }

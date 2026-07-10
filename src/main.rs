@@ -2,12 +2,12 @@ mod audio;
 mod cli;
 #[cfg(target_os = "macos")]
 mod default_input_watcher;
-mod error;
 mod logging;
 mod resampler;
 mod router;
 mod service;
 
+use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Command};
 
@@ -18,11 +18,11 @@ fn main() {
     }
 }
 
-fn run() -> error::Result<()> {
+fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Run(args) => router::run(args),
-        Command::Install(args) => service::install(args),
+        Command::Run(args) => router::run(&args),
+        Command::Install(args) => service::install(&args),
         Command::Uninstall => service::uninstall(),
         Command::Start => service::start(),
         Command::Stop => service::stop(),

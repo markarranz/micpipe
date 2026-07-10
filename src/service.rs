@@ -1,16 +1,15 @@
 use std::path::PathBuf;
 use std::process::Command as ProcCommand;
 
-use crate::{
-    cli::RunArgs,
-    error::{self, Result, ResultExt},
-};
+use anyhow::{Context, Result, bail};
+
+use crate::cli::RunArgs;
 
 const SERVICE_NAME: &str = "micpipe";
 const SERVICE_LABEL: &str = "com.markarranz.micpipe";
 const PLIST_TEMPLATE: &str = include_str!("plist.template");
 
-pub fn install(args: RunArgs) -> Result<()> {
+pub fn install(args: &RunArgs) -> Result<()> {
     let log_dir = log_dir()?;
     std::fs::create_dir_all(&log_dir)
         .context(format!("could not create log dir {}", log_dir.display()))?;
@@ -61,9 +60,9 @@ pub fn install(args: RunArgs) -> Result<()> {
     if status.success() {
         println!("{SERVICE_NAME} service installed and started");
     } else {
-        return Err(error::message(format!(
+        bail!(
             "plist written, but bootstrap failed (it may already be loaded - try `{SERVICE_NAME} restart`)"
-        )));
+        );
     }
     Ok(())
 }
@@ -87,9 +86,7 @@ pub fn uninstall() -> Result<()> {
 pub fn start() -> Result<()> {
     let plist_path = plist_path()?;
     if !plist_path.exists() {
-        return Err(error::message(format!(
-            "Service not installed. Run `{SERVICE_NAME} install` first."
-        )));
+        bail!("Service not installed. Run `{SERVICE_NAME} install` first.");
     }
 
     let domain = domain_target()?;
@@ -105,9 +102,7 @@ pub fn start() -> Result<()> {
     if status.success() {
         println!("{SERVICE_NAME} started.");
     } else {
-        return Err(error::message(
-            "Failed to start (it may already be running).",
-        ));
+        bail!("Failed to start (it may already be running).");
     }
     Ok(())
 }
@@ -127,9 +122,7 @@ pub fn stop() -> Result<()> {
     if status.success() {
         println!("{SERVICE_NAME} stopped.");
     } else {
-        return Err(error::message(
-            "Failed to stop (it may not have been running).",
-        ));
+        bail!("Failed to stop (it may not have been running).");
     }
     Ok(())
 }
@@ -139,9 +132,7 @@ pub fn restart() -> Result<()> {
     if status.success() {
         println!("{SERVICE_NAME} restarted.");
     } else {
-        return Err(error::message(
-            "Failed to restart (is it installed and loaded?).",
-        ));
+        bail!("Failed to restart (is it installed and loaded?).");
     }
     Ok(())
 }
@@ -178,21 +169,20 @@ pub fn status() -> Result<()> {
     let pid = text
         .lines()
         .find_map(|l| l.trim().strip_prefix("pid = "))
-        .map(|p| p.trim());
+        .map(str::trim);
     let last_exit = text
         .lines()
         .find_map(|l| l.trim().strip_prefix("last exit code = "))
-        .map(|c| c.trim());
+        .map(str::trim);
 
-    match pid {
-        Some(pid) => println!("running (pid {pid})"),
-        None => {
-            print!("loaded, but not running");
-            if let Some(code) = last_exit {
-                print!(" (last exit code {code})");
-            }
-            println!();
+    if let Some(pid) = pid {
+        println!("running (pid {pid})");
+    } else {
+        print!("loaded, but not running");
+        if let Some(code) = last_exit {
+            print!(" (last exit code {code})");
         }
+        println!();
     }
 
     println!("plist: {}", plist_path.display());
@@ -226,7 +216,7 @@ fn current_uid() -> Result<String> {
         .output()
         .context("failed to run `id -u`")?;
     if !output.status.success() {
-        return Err(error::message("failed to determine current uid"));
+        bail!("failed to determine current uid");
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
