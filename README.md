@@ -15,6 +15,9 @@ It can also run in the foreground while you are testing.
 - Restarts automatically when the system default input changes.
 - Restarts automatically when the default input disconnects.
 - Waits for a pinned input to reconnect, then restarts automatically.
+- On macOS, starts audio streams only while another app is actively using the
+  selected output as an input.
+- Stops the audio streams when no app is actively reading the selected output.
 
 ## What it is not
 
@@ -53,6 +56,10 @@ micpipe run
 
 By default, `micpipe run` follows the system default input device and routes it
 to the first output device whose description contains `BlackHole 2ch`.
+
+On macOS, `micpipe` waits for an app to actively select that output as an input
+before it starts the audio streams. For example, select `BlackHole 2ch` as the
+microphone in a calling app, then join or start the call.
 
 Install and start the background service:
 
@@ -95,10 +102,10 @@ micpipe run --debug
 
 Install BlackHole separately before using the default output route.
 
-Run `micpipe run` once from the terminal if macOS needs to prompt for microphone
-permission. The permission belongs to the app or binary that starts `micpipe`, so
-the foreground test is the easiest way to confirm capture works before installing
-the service.
+Run `micpipe run` from the terminal, then select its output as an input in an
+app if macOS needs to prompt for microphone permission. The permission belongs
+to the app or binary that starts `micpipe`, so the foreground test is the
+easiest way to confirm capture works before installing the service.
 
 ## CLI reference
 
@@ -172,7 +179,7 @@ Log lines are timestamped in the user's local timezone with a numeric offset,
 for example:
 
 ```text
-[2026-06-29T13:04:05-07:00] Mic -> BlackHole running...
+[2026-06-29T13:04:05-07:00] Mic -> BlackHole 2ch running while output is being used as input
 ```
 
 Human-facing lifecycle and recovery messages go to `out.log`. Raw stream errors
@@ -218,6 +225,13 @@ Select a default microphone in macOS Sound settings, or pass an explicit input:
 ```bash
 micpipe run --input "Your Microphone"
 ```
+
+### Audio streams are idle
+
+On macOS, this is expected until another app actively uses the selected output
+as an input. Select the exact output device in the app's microphone settings and
+start the app's input, such as by joining a call. Merely showing the device in
+an audio menu may not start an input stream.
 
 ### Service installed but not loaded
 

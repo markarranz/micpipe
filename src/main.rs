@@ -3,6 +3,8 @@ mod cli;
 #[cfg(target_os = "macos")]
 mod default_input_watcher;
 mod logging;
+#[cfg(target_os = "macos")]
+mod output_usage_watcher;
 mod resampler;
 mod router;
 mod service;

@@ -17,20 +17,22 @@ writes them into an output device such as BlackHole.
 ## High-level flow
 
 ```text
-CLI -> service/router
-router -> CPAL input stream -> InputPipe -> ring buffer -> OutputPipe -> CPAL output stream
+CLI -> service/router -> output usage watcher
+output demand -> CPAL input stream -> InputPipe -> ring buffer -> OutputPipe -> CPAL output stream
 ```
 
 `src/main.rs` parses the CLI and dispatches commands. `src/service.rs` owns the
 `launchd` plist lifecycle. `src/router.rs` owns the runtime audio route.
-`AudioRuntime` keeps the stream handles, optional default-input listener, and
-control channel alive for the duration of `run`.
+`AudioRuntime` keeps the route, demand watcher, stream handles, optional
+default-input listener, and control channel alive for the duration of `run`.
 
 ## Modules
 
 - `src/cli.rs`: subcommands and shared run/install arguments.
 - `src/default_input_watcher.rs`: macOS Core Audio listener for default input
   device changes.
+- `src/output_usage_watcher.rs`: macOS Core Audio process/device watcher that
+  detects active input clients for the selected output.
 - `src/service.rs`: install, uninstall, start, stop, restart, status, plist
   rendering, and `launchctl` calls.
 - `src/audio.rs`: CPAL device lookup and frame channel conversion.
@@ -46,6 +48,14 @@ control channel alive for the duration of `run`.
 is created. A missing `--input` uses CPAL's default input device. A provided
 `--input` or `--output` is matched as a case-insensitive substring against
 device descriptions.
+
+On macOS, resolving a route does not start audio work. `OutputUsageWatcher`
+polls CoreAudio's process objects and looks for a process that is actively
+running input against the selected output device. The watcher sends a control
+message when that demand changes. The runtime creates a fresh input stream,
+ring buffer, and output stream when demand appears, and drops both streams when
+demand disappears. The process's own output stream is not considered an input
+client because the query uses CoreAudio's input-device scope.
 
 The input stream uses the device default input config. The output stream uses the
 device default output config, but prefers a 512-frame output buffer. When CPAL
@@ -127,7 +137,9 @@ restart requests so the service is asked to restart only once for the first
 recovery event.
 
 Output stream errors are logged only. There is no output-device reconnect
-policy today.
+policy today. While the selected output has no active input client, no CPAL
+audio streams exist and the input callback, resampler, ring buffer, output
+callback, and debug buffer logger do not run.
 
 ## Service model
 
@@ -170,6 +182,8 @@ The steady-state runtime has:
 - CPAL's input callback.
 - CPAL's output callback.
 - An optional debug logger thread.
+- A macOS output-usage watcher thread that polls CoreAudio process objects while
+  the route is idle or active.
 - A main runtime loop waiting for control messages.
 - A restart thread for immediate default-input recovery, a Core Audio listener
   thread for default-input changes, or a reconnect watcher thread for
@@ -180,6 +194,10 @@ sleep. Shared debug state is a single relaxed atomic occupancy value. In pinned
 input mode, the input error callback sends a `StopAudioWork` control message;
 the main runtime loop handles that message by dropping the stream handles and
 stopping the debug logger.
+
+The output-usage watcher performs CoreAudio queries on its own thread. The
+audio callbacks never enumerate processes or devices, take mutexes, call
+`launchctl`, or sleep.
 
 ## Tests
 
@@ -194,6 +212,7 @@ owning real audio devices:
 - Restart-policy selection.
 - Plist rendering and XML escaping.
 - Timestamp formatting.
+- Output-demand matching for a process input-device list.
 
 ## Known constraints
 
@@ -202,6 +221,7 @@ owning real audio devices:
 - Pinned-device reconnect detection is polling based, with a 5 second interval.
 - Default-input change detection is macOS-specific and uses Core Audio HAL
   property notifications.
+- Output-demand detection is macOS-specific and polls CoreAudio every 250 ms.
 - Output disconnects do not trigger restart or reconnect handling.
 - The main runtime loop is still process-lifetime scoped; shutdown is currently
   handled by process termination or `launchd`.
