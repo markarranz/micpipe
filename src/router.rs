@@ -1,3 +1,5 @@
+//! Runtime orchestration for the CPAL input, ring buffer, and output streams.
+
 use std::{
     sync::{
         Arc,
@@ -36,7 +38,16 @@ const STEADY_CUSHION_CALLBACKS: usize = 2;
 const JITTERY_EXTRA_MARGIN_MS: u32 = 50;
 const RESAMPLED_SCRATCH_CAPACITY: usize = 8192;
 const PINNED_INPUT_RECONNECT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Input rates at or below this threshold receive extra jitter margin.
+const LIKELY_JITTERY_MAX_RATE_HZ: u32 = 24_000;
+/// Four target fills absorb short bursts without immediately overflowing.
+const BUFFER_CAPACITY_TARGET_MULTIPLIER: usize = 4;
+/// Keep at least eight output callbacks of capacity for steady-state bursts.
+const BUFFER_CAPACITY_CALLBACK_MULTIPLIER: usize = 8;
+/// Number of milliseconds in one second for sample-rate conversion.
+const MILLIS_PER_SECOND: usize = 1_000;
 
+/// Starts the audio route and keeps it alive until the process exits.
 pub fn run(args: &RunArgs) -> Result<()> {
     let runtime = AudioRuntime::start(args)?;
     runtime.park();
@@ -387,6 +398,10 @@ fn watch_default_input_changes_when_needed(
     Ok(None)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "The percentage is diagnostic output, not control data"
+)]
 fn spawn_buffer_logger(
     debug: bool,
     occupancy: Arc<AtomicUsize>,
@@ -449,6 +464,7 @@ impl AudioDisconnectAction {
     }
 }
 
+/// Control messages handled by the runtime loop.
 pub(crate) enum AudioControl {
     StopAudioWork,
     OutputUsageChanged(bool),
@@ -654,8 +670,8 @@ struct BufferPlan {
 
 impl BufferPlan {
     fn new(in_rate: u32, out_rate: u32, out_channels: usize, output_buffer_frames: u32) -> Self {
-        let likely_jittery = in_rate <= 24_000;
-        let samples_per_ms = ((out_rate as usize * out_channels) / 1_000).max(1);
+        let likely_jittery = in_rate <= LIKELY_JITTERY_MAX_RATE_HZ;
+        let samples_per_ms = ((out_rate as usize * out_channels) / MILLIS_PER_SECOND).max(1);
         let callback_samples = output_buffer_frames as usize * out_channels;
         let jitter_extra = if likely_jittery {
             JITTERY_EXTRA_MARGIN_MS as usize * samples_per_ms
@@ -665,7 +681,8 @@ impl BufferPlan {
 
         // Cushion = baseline phase-offset coverage + (jittery margin if applicable).
         let target_fill = STEADY_CUSHION_CALLBACKS * callback_samples + jitter_extra;
-        let capacity = (target_fill * 4).max(callback_samples * 8);
+        let capacity = (target_fill * BUFFER_CAPACITY_TARGET_MULTIPLIER)
+            .max(callback_samples * BUFFER_CAPACITY_CALLBACK_MULTIPLIER);
 
         Self {
             likely_jittery,
@@ -866,6 +883,10 @@ mod tests {
         assert_eq!(consumer.try_pop(), None);
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "These output fixtures use exactly representable sample values"
+    )]
     #[test]
     fn output_pipe_waits_for_cushion_before_draining() {
         let (mut producer, consumer) = HeapRb::<f32>::new(4).split();
@@ -881,6 +902,10 @@ mod tests {
         assert_eq!(occupancy.load(Ordering::Relaxed), 2);
     }
 
+    #[expect(
+        clippy::float_cmp,
+        reason = "These output fixtures use exactly representable sample values"
+    )]
     #[test]
     fn output_pipe_drains_after_cushion_is_ready() {
         let (mut producer, consumer) = HeapRb::<f32>::new(4).split();

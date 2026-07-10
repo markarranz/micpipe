@@ -1,4 +1,5 @@
-/// Streaming linear resampler. Operates on whole frames (channels samples each).
+//! Streaming linear resampling over whole audio frames.
+
 #[derive(Debug)]
 pub struct Resampler {
     ratio: f32,        // in_rate / out_rate; how far position advances per output frame
@@ -10,6 +11,11 @@ pub struct Resampler {
 }
 
 impl Resampler {
+    /// Creates a resampler for the given input and output formats.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "The simple phase accumulator intentionally uses f32 audio math"
+    )]
     pub fn new(in_rate: u32, out_rate: u32, channels: usize) -> Self {
         Self {
             ratio: in_rate as f32 / out_rate as f32,

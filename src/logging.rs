@@ -1,17 +1,22 @@
+//! Timestamped stdout and stderr logging helpers.
+
 use std::{
     fmt,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Writes a timestamped message to stdout.
 pub fn stdout(args: fmt::Arguments<'_>) {
     println!("[{}] {}", timestamp_local(), args);
 }
 
+/// Writes a timestamped message to stderr.
 pub fn stderr(args: fmt::Arguments<'_>) {
     eprintln!("[{}] {}", timestamp_local(), args);
 }
 
 #[macro_export]
+/// Writes a timestamped message to stdout.
 macro_rules! log_out {
     ($($arg:tt)*) => {
         $crate::logging::stdout(format_args!($($arg)*))
@@ -19,6 +24,7 @@ macro_rules! log_out {
 }
 
 #[macro_export]
+/// Writes a timestamped message to stderr.
 macro_rules! log_err {
     ($($arg:tt)*) => {
         $crate::logging::stderr(format_args!($($arg)*))
@@ -77,8 +83,11 @@ fn timestamp_from_unix_local(_unix_seconds: u64) -> Option<String> {
 }
 
 fn timestamp_from_unix_utc(unix_seconds: u64) -> String {
-    let days = (unix_seconds / 86_400) as i64;
-    let seconds_of_day = unix_seconds % 86_400;
+    let days = i64::try_from(unix_seconds / 86_400)
+        .expect("Unix timestamp exceeds the supported calendar range");
+    let seconds_of_day: u32 = (unix_seconds % 86_400)
+        .try_into()
+        .expect("seconds of day is less than one day");
     let (year, month, day) = civil_from_days(days);
     let hour = seconds_of_day / 3_600;
     let minute = (seconds_of_day % 3_600) / 60;
@@ -88,9 +97,9 @@ fn timestamp_from_unix_utc(unix_seconds: u64) -> String {
         year,
         month,
         day,
-        hour as i64,
-        minute as i64,
-        second as i64,
+        i64::from(hour),
+        i64::from(minute),
+        i64::from(second),
         0,
     )
 }

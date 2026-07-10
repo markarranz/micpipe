@@ -1,3 +1,5 @@
+//! Core Audio listener for changes to the default input device.
+
 use std::{ffi::c_void, ptr::NonNull, sync::mpsc::Sender};
 
 use objc2_core_audio::{
@@ -9,12 +11,14 @@ use objc2_core_audio::{
 
 use anyhow::{Result, bail};
 
+/// Keeps a Core Audio default-input listener registered for its lifetime.
 pub struct DefaultInputChangeListener {
     address: AudioObjectPropertyAddress,
     sender: Box<Sender<()>>,
 }
 
 impl DefaultInputChangeListener {
+    /// Registers a listener that sends a notification when the default input changes.
     pub fn new(sender: Sender<()>) -> Result<Self> {
         let address = AudioObjectPropertyAddress {
             mSelector: kAudioHardwarePropertyDefaultInputDevice,
@@ -32,7 +36,7 @@ impl DefaultInputChangeListener {
                 kAudioObjectSystemObject as AudioObjectID,
                 NonNull::from(&address),
                 Some(default_input_changed),
-                sender.as_ref() as *const Sender<()> as *mut c_void,
+                sender_pointer(sender.as_ref()),
             )
         };
 
@@ -53,10 +57,14 @@ impl Drop for DefaultInputChangeListener {
                 kAudioObjectSystemObject as AudioObjectID,
                 NonNull::from(&self.address),
                 Some(default_input_changed),
-                self.sender.as_ref() as *const Sender<()> as *mut c_void,
+                sender_pointer(self.sender.as_ref()),
             )
         };
     }
+}
+
+fn sender_pointer(sender: &Sender<()>) -> *mut c_void {
+    std::ptr::from_ref(sender).cast_mut().cast()
 }
 
 unsafe extern "C-unwind" fn default_input_changed(
