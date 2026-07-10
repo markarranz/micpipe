@@ -27,6 +27,8 @@ use crate::{
 use crate::cli::RunArgs;
 #[cfg(target_os = "macos")]
 use crate::default_input_watcher::DefaultInputChangeListener;
+#[cfg(target_os = "macos")]
+use crate::output_usage_watcher::OutputUsageWatcher;
 
 // Preferred output callback size. The selected output device may clamp this.
 const REQUESTED_OUTPUT_BUFFER_FRAMES: u32 = 512;
@@ -41,10 +43,19 @@ pub fn run(args: &RunArgs) -> Result<()> {
 }
 
 struct AudioRuntime {
+    route: AudioRoute,
+    buffer_plan: BufferPlan,
+    restart_policy: RestartPolicy,
+    restart_requested: Arc<AtomicBool>,
+    audio_control_sender: std::sync::mpsc::Sender<AudioControl>,
+    debug: bool,
     input_stream: Option<cpal::Stream>,
     output_stream: Option<cpal::Stream>,
-    audio_work_active: Arc<AtomicBool>,
+    audio_work_active: Option<Arc<AtomicBool>>,
+    output_in_use: bool,
     audio_control_receiver: std::sync::mpsc::Receiver<AudioControl>,
+    #[cfg(target_os = "macos")]
+    _output_usage_watcher: OutputUsageWatcher,
     #[cfg(target_os = "macos")]
     _default_input_change_listener: Option<DefaultInputChangeListener>,
 }
@@ -61,24 +72,126 @@ impl AudioRuntime {
             route.out_channels,
             route.output_buffer_frames,
         );
-        let (producer, consumer) = HeapRb::<f32>::new(buffer_plan.capacity).split();
         log_buffer_plan(buffer_plan);
 
-        // Clock-drift instrumentation: shared buffer-occupancy gauge.
-        let occupancy = Arc::new(AtomicUsize::new(0));
         let restart_requested = Arc::new(AtomicBool::new(false));
-        let audio_work_active = Arc::new(AtomicBool::new(true));
         let (audio_control_sender, audio_control_receiver) = std::sync::mpsc::channel();
 
-        let input_stream = build_input_stream(
+        #[cfg(target_os = "macos")]
+        let output_usage_watcher =
+            OutputUsageWatcher::start(&route.output_device, audio_control_sender.clone())?;
+
+        #[cfg(target_os = "macos")]
+        let default_input_change_listener = watch_default_input_changes_when_needed(
             &route,
-            producer,
-            restart_policy.clone(),
+            &restart_policy,
             Arc::clone(&restart_requested),
-            audio_control_sender,
         )?;
-        let output_stream =
-            build_output_stream(&route, consumer, buffer_plan, Arc::clone(&occupancy))?;
+
+        let runtime = Self {
+            route,
+            buffer_plan,
+            restart_policy,
+            restart_requested,
+            audio_control_sender,
+            debug: args.debug,
+            input_stream: None,
+            output_stream: None,
+            audio_work_active: None,
+            output_in_use: false,
+            audio_control_receiver,
+            #[cfg(target_os = "macos")]
+            _output_usage_watcher: output_usage_watcher,
+            #[cfg(target_os = "macos")]
+            _default_input_change_listener: default_input_change_listener,
+        };
+
+        // CoreAudio can report process input usage on macOS. Other hosts retain the previous
+        // always-on behavior because they do not expose an equivalent demand signal here.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut runtime = runtime;
+            runtime.output_in_use = true;
+            runtime.start_audio_work()?;
+            return Ok(runtime);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            Ok(runtime)
+        }
+    }
+
+    fn park(mut self) -> ! {
+        loop {
+            match self
+                .audio_control_receiver
+                .recv_timeout(Duration::from_millis(500))
+            {
+                Ok(AudioControl::StopAudioWork) => {
+                    if self.stop_audio_work() {
+                        crate::log_out!(
+                            "audio streams stopped while waiting for pinned input reconnect"
+                        );
+                    }
+                }
+                Ok(AudioControl::OutputUsageChanged(in_use)) => {
+                    self.output_in_use = in_use;
+                    if in_use {
+                        self.try_start_audio_work();
+                    } else if self.stop_audio_work() {
+                        crate::log_out!(
+                            "audio streams stopped because output is no longer being used as input"
+                        );
+                    } else {
+                        crate::log_out!(
+                            "waiting for {} to be used as input before starting audio work",
+                            self.route.output_description
+                        );
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // A transient stream-setup failure should not require the consuming app to
+                    // close and reopen its input before micpipe gets another chance.
+                    if self.output_in_use && self.input_stream.is_none() {
+                        self.try_start_audio_work();
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => std::thread::park(),
+            }
+        }
+    }
+
+    fn try_start_audio_work(&mut self) {
+        if self.input_stream.is_some() {
+            return;
+        }
+
+        if let Err(err) = self.start_audio_work() {
+            crate::log_err!("failed to start audio work: {}", err);
+        }
+    }
+
+    fn start_audio_work(&mut self) -> Result<()> {
+        let (producer, consumer) = HeapRb::<f32>::new(self.buffer_plan.capacity).split();
+
+        // Clock-drift instrumentation: shared buffer-occupancy gauge for this active session.
+        let occupancy = Arc::new(AtomicUsize::new(0));
+        let audio_work_active = Arc::new(AtomicBool::new(true));
+
+        let input_stream = build_input_stream(
+            &self.route,
+            producer,
+            self.restart_policy.clone(),
+            Arc::clone(&self.restart_requested),
+            self.audio_control_sender.clone(),
+        )?;
+        let output_stream = build_output_stream(
+            &self.route,
+            consumer,
+            self.buffer_plan,
+            Arc::clone(&occupancy),
+        )?;
 
         input_stream
             .play()
@@ -87,44 +200,30 @@ impl AudioRuntime {
             .play()
             .context("failed to start output stream")?;
 
-        crate::log_out!("Mic -> BlackHole running...");
-
-        #[cfg(target_os = "macos")]
-        let default_input_change_listener =
-            watch_default_input_changes_when_needed(&route, &restart_policy, restart_requested)?;
+        crate::log_out!(
+            "Mic -> {} running while output is being used as input",
+            self.route.output_description
+        );
 
         spawn_buffer_logger(
-            args.debug,
+            self.debug,
             occupancy,
-            buffer_plan,
+            self.buffer_plan,
             Arc::clone(&audio_work_active),
         );
 
-        Ok(Self {
-            input_stream: Some(input_stream),
-            output_stream: Some(output_stream),
-            audio_work_active,
-            audio_control_receiver,
-            #[cfg(target_os = "macos")]
-            _default_input_change_listener: default_input_change_listener,
-        })
+        self.input_stream = Some(input_stream);
+        self.output_stream = Some(output_stream);
+        self.audio_work_active = Some(audio_work_active);
+        Ok(())
     }
-    fn park(mut self) -> ! {
-        loop {
-            match self.audio_control_receiver.recv() {
-                Ok(AudioControl::StopAudioWork) => {
-                    let stopped_input = self.input_stream.take().is_some();
-                    let stopped_output = self.output_stream.take().is_some();
-                    if stopped_input || stopped_output {
-                        self.audio_work_active.store(false, Ordering::Relaxed);
-                        crate::log_out!(
-                            "audio streams stopped while waiting for pinned input reconnect"
-                        );
-                    }
-                }
-                Err(_) => std::thread::park(),
-            }
+    fn stop_audio_work(&mut self) -> bool {
+        let stopped_input = self.input_stream.take().is_some();
+        let stopped_output = self.output_stream.take().is_some();
+        if let Some(audio_work_active) = self.audio_work_active.take() {
+            audio_work_active.store(false, Ordering::Relaxed);
         }
+        stopped_input || stopped_output
     }
 }
 
@@ -350,8 +449,9 @@ impl AudioDisconnectAction {
     }
 }
 
-enum AudioControl {
+pub(crate) enum AudioControl {
     StopAudioWork,
+    OutputUsageChanged(bool),
 }
 
 struct AudioRoute {
