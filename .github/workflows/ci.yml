@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -21,15 +26,19 @@ jobs:
         uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: clippy, rustfmt
+          targets: x86_64-apple-darwin
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Test
-        run: cargo test
+        run: cargo test --all-targets --locked
 
       - name: Lint
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Check Intel target
+        run: cargo check --target x86_64-apple-darwin --locked
 
       - name: Package
-        run: cargo package
+        run: cargo package --locked
