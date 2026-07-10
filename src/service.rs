@@ -1,3 +1,5 @@
+//! Lifecycle management for the per-user `launchd` service.
+
 use std::path::PathBuf;
 use std::process::Command as ProcCommand;
 
@@ -9,6 +11,7 @@ const SERVICE_NAME: &str = "micpipe";
 const SERVICE_LABEL: &str = "com.markarranz.micpipe";
 const PLIST_TEMPLATE: &str = include_str!("plist.template");
 
+/// Installs and starts the configured per-user service.
 pub fn install(args: &RunArgs) -> Result<()> {
     let log_dir = log_dir()?;
     std::fs::create_dir_all(&log_dir)
@@ -67,6 +70,7 @@ pub fn install(args: &RunArgs) -> Result<()> {
     Ok(())
 }
 
+/// Stops the service and removes its launchd plist.
 pub fn uninstall() -> Result<()> {
     let _ = ProcCommand::new("launchctl")
         .args(["bootout", service_target()?.as_str()])
@@ -83,6 +87,7 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
+/// Starts an installed service.
 pub fn start() -> Result<()> {
     let plist_path = plist_path()?;
     if !plist_path.exists() {
@@ -107,6 +112,7 @@ pub fn start() -> Result<()> {
     Ok(())
 }
 
+/// Stops the installed service.
 pub fn stop() -> Result<()> {
     let domain = domain_target()?;
     let plist_path = plist_path()?;
@@ -127,6 +133,7 @@ pub fn stop() -> Result<()> {
     Ok(())
 }
 
+/// Restarts the installed service.
 pub fn restart() -> Result<()> {
     let status = restart_service()?;
     if status.success() {
@@ -137,6 +144,7 @@ pub fn restart() -> Result<()> {
     Ok(())
 }
 
+/// Requests a launchd service restart and returns its process status.
 pub fn restart_service() -> Result<std::process::ExitStatus> {
     let target = service_target()?;
     ProcCommand::new("launchctl")
@@ -145,6 +153,7 @@ pub fn restart_service() -> Result<std::process::ExitStatus> {
         .context("failed to run launchctl kickstart")
 }
 
+/// Prints whether the service is installed, loaded, and running.
 pub fn status() -> Result<()> {
     let plist_path = plist_path()?;
     if !plist_path.exists() {

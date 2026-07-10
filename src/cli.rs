@@ -1,3 +1,5 @@
+//! Command-line definitions for the `micpipe` service.
+
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -6,12 +8,14 @@ use clap::{Parser, Subcommand};
     version,
     about = "Route your microphone into another audio device, like BlackHole."
 )]
+/// Parsed `micpipe` command-line arguments.
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 }
 
 #[derive(Debug, Subcommand)]
+/// Commands supported by the `micpipe` executable.
 pub enum Command {
     /// Run the audio driver (this is what the launchd service invokes.)
     Run(RunArgs),
@@ -30,6 +34,7 @@ pub enum Command {
 }
 
 #[derive(Debug, Clone, clap::Args)]
+/// Arguments shared by the foreground and service-run commands.
 pub struct RunArgs {
     /// Output device name to route into (substring match).
     #[arg(short, long, default_value = "BlackHole 2ch")]

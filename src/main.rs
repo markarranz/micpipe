@@ -1,3 +1,5 @@
+//! Command-line entry point for the `micpipe` audio routing service.
+
 mod audio;
 mod cli;
 #[cfg(target_os = "macos")]

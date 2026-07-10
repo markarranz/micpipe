@@ -1,3 +1,5 @@
+//! Runtime orchestration for the CPAL input, ring buffer, and output streams.
+
 use std::{
     sync::{
         Arc,
@@ -37,6 +39,7 @@ const JITTERY_EXTRA_MARGIN_MS: u32 = 50;
 const RESAMPLED_SCRATCH_CAPACITY: usize = 8192;
 const PINNED_INPUT_RECONNECT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Starts the audio route and keeps it alive until the process exits.
 pub fn run(args: &RunArgs) -> Result<()> {
     let runtime = AudioRuntime::start(args)?;
     runtime.park();
@@ -449,6 +452,7 @@ impl AudioDisconnectAction {
     }
 }
 
+/// Control messages handled by the runtime loop.
 pub(crate) enum AudioControl {
     StopAudioWork,
     OutputUsageChanged(bool),

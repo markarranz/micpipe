@@ -1,3 +1,5 @@
+//! Polls Core Audio to detect active input clients for the selected output.
+
 use std::{
     ffi::c_void,
     mem::{MaybeUninit, size_of},

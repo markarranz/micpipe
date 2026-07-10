@@ -29,6 +29,7 @@ default-input listener, and control channel alive for the duration of `run`.
 ## Modules
 
 - `src/cli.rs`: subcommands and shared run/install arguments.
+- `src/main.rs`: CLI parsing and command dispatch.
 - `src/default_input_watcher.rs`: macOS Core Audio listener for default input
   device changes.
 - `src/output_usage_watcher.rs`: macOS Core Audio process/device watcher that
@@ -40,7 +41,6 @@ default-input listener, and control channel alive for the duration of `run`.
   runtime orchestration.
 - `src/resampler.rs`: streaming linear frame resampler.
 - `src/logging.rs`: timestamped stdout/stderr log helpers.
-- `src/error.rs`: lightweight error/context helpers.
 
 ## Route setup
 

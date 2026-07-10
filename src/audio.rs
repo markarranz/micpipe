@@ -1,3 +1,5 @@
+//! Device discovery and per-frame channel conversion.
+
 use cpal::traits::{DeviceTrait, HostTrait};
 
 use anyhow::{Context, Result};

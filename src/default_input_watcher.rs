@@ -1,3 +1,5 @@
+//! Core Audio listener for changes to the default input device.
+
 use std::{ffi::c_void, ptr::NonNull, sync::mpsc::Sender};
 
 use objc2_core_audio::{
@@ -9,12 +11,14 @@ use objc2_core_audio::{
 
 use anyhow::{Result, bail};
 
+/// Keeps a Core Audio default-input listener registered for its lifetime.
 pub struct DefaultInputChangeListener {
     address: AudioObjectPropertyAddress,
     sender: Box<Sender<()>>,
 }
 
 impl DefaultInputChangeListener {
+    /// Registers a listener that sends a notification when the default input changes.
     pub fn new(sender: Sender<()>) -> Result<Self> {
         let address = AudioObjectPropertyAddress {
             mSelector: kAudioHardwarePropertyDefaultInputDevice,

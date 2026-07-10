@@ -1,17 +1,22 @@
+//! Timestamped stdout and stderr logging helpers.
+
 use std::{
     fmt,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Writes a timestamped message to stdout.
 pub fn stdout(args: fmt::Arguments<'_>) {
     println!("[{}] {}", timestamp_local(), args);
 }
 
+/// Writes a timestamped message to stderr.
 pub fn stderr(args: fmt::Arguments<'_>) {
     eprintln!("[{}] {}", timestamp_local(), args);
 }
 
 #[macro_export]
+/// Writes a timestamped message to stdout.
 macro_rules! log_out {
     ($($arg:tt)*) => {
         $crate::logging::stdout(format_args!($($arg)*))
@@ -19,6 +24,7 @@ macro_rules! log_out {
 }
 
 #[macro_export]
+/// Writes a timestamped message to stderr.
 macro_rules! log_err {
     ($($arg:tt)*) => {
         $crate::logging::stderr(format_args!($($arg)*))
