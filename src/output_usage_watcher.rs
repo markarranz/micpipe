@@ -230,12 +230,10 @@ fn device_uid(device_id: AudioDeviceID) -> Result<String> {
     };
     check_status(status, "failed to read CoreAudio device UID")?;
 
-    if uid.is_null() {
-        return Err(anyhow!("CoreAudio returned a null device UID"));
-    }
+    let uid = NonNull::new(uid).ok_or_else(|| anyhow!("CoreAudio returned a null device UID"))?;
 
     // SAFETY: The successful property query returns a CFString retained for the caller.
-    Ok(unsafe { CFRetained::from_raw(NonNull::new(uid).unwrap()).to_string() })
+    Ok(unsafe { CFRetained::from_raw(uid).to_string() })
 }
 
 fn property_data<T: Copy>(
